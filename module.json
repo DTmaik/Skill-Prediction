@@ -1,0 +1,15 @@
+{
+	"name": "Skill-Prediction",
+	"author": "DTmaik",
+	"description": "Skill-Prediction for Patch 31 (all classes in one mod).",
+	"readmePath": "./README.md",
+	"disableAutoUpdate": false,
+	"options": {
+		"cliName": "Skill-Prediction",
+		"guiName": "Skill-Prediction",
+		"reloadable": true
+	},
+	"servers": [
+		"https://raw.githubusercontent.com/DTmaik/Skill-Prediction/main/"
+	]
+}
