@@ -34,6 +34,7 @@ it shows all options of that class and whether they are on.
 | `!<class> bug [note]` | Save a log for bug reports |
 | `!<class> reload` | Read the config again after editing it by hand |
 | `!sp ping <ms>` | Set your ping once for all classes (`!sp ping` shows it) |
+| `!sp omnikeys <keys>` | Your movement keys for `omni`, in the order forward, left, back, right, for all classes. For example `!sp omnikeys zqsd` (AZERTY) or your own keys like `gfde`. `!sp omnikeys wasd` is the default |
 
 Some class options:
 

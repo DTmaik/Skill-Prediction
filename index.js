@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const createPrediction = require('./core');
+const omni = require('./omni');
 
 const CLASS_FILES = ['zerk', 'gunner', 'archer', 'sorc', 'reaper', 'slayer', 'lancer', 'warrior', 'priest', 'mystic'];
 
@@ -87,9 +88,28 @@ module.exports = function SkillPrediction(dispatch) {
 	const sharedPath = path.join(__dirname, 'data', 'shared.json');
 	const configOf = (def) => path.join(__dirname, 'data', def.DATA_DIR || def.CMD, 'config.json');
 	function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return null; } }
+	// settings for all classes (ping, omni keys) in data/shared.json
+	function writeShared(patch) {
+		fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
+		fs.writeFileSync(sharedPath, JSON.stringify(Object.assign({}, readJson(sharedPath) || {}, patch), null, '\t'), 'utf8');
+	}
+	{
+		const shared = readJson(sharedPath);
+		if (shared && shared.OMNI_KEYS) omni.setKeys(shared.OMNI_KEYS);
+	}
+	function omniKeysCommand(arg) {
+		if (arg === undefined) return sendChat(SP_NAME, `Omni keys (forward, left, back, right): ${omni.keyNames().toUpperCase()}. Change: sp omnikeys zqsd (AZERTY) or your own 4 keys, default: sp omnikeys wasd`);
+		if (!omni.setKeys(arg)) return sendChat(SP_NAME, 'Give 4 different letters or digits in the order forward, left, back, right, for example sp omnikeys zqsd');
+		try { writeShared({ OMNI_KEYS: omni.keyNames() }); } catch (e) { console.error('[Skill-Prediction] data/shared.json could not be saved:', e); return sendChat(SP_NAME, 'Could not save the omni keys (see the Toolbox console).'); }
+		sendChat(SP_NAME, `Omni keys set to ${omni.keyNames().toUpperCase()} (forward, left, back, right) for all classes.`);
+	}
 	function spCommand(args) {
 		const sub = String(args[0] || '').toLowerCase();
-		if (sub !== 'ping') return sendChat(SP_NAME, 'sp ping 110 sets your ping (in ms) for all classes at once.');
+		if (sub === 'omnikeys') return omniKeysCommand(args[1]);
+		if (sub !== 'ping') {
+			sendChat(SP_NAME, 'sp ping 110 sets your ping (in ms) for all classes at once.');
+			return sendChat(SP_NAME, 'sp omnikeys zqsd sets the omni keys (forward, left, back, right), e.g. for AZERTY.');
+		}
 		if (args[1] === undefined) {
 			const shared = readJson(sharedPath);
 			let ping = shared && Number.isFinite(Number(shared.GLOBAL_LATENCY)) ? Number(shared.GLOBAL_LATENCY) : null;
@@ -103,8 +123,7 @@ module.exports = function SkillPrediction(dispatch) {
 		const v = Math.round(Number(args[1]));
 		if (!/^\d+$/.test(String(args[1])) || !(v >= 0 && v <= 999)) return sendChat(SP_NAME, 'The ping must be a number from 0 to 999 (ms).');
 		try {
-			fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
-			fs.writeFileSync(sharedPath, JSON.stringify({ GLOBAL_LATENCY: v }, null, '\t'), 'utf8');
+			writeShared({ GLOBAL_LATENCY: v });
 		} catch (e) { console.error('[Skill-Prediction] data/shared.json could not be saved:', e); return sendChat(SP_NAME, 'Could not save the ping (see the Toolbox console).'); }
 		let n = 0;
 		for (const def of defs) {

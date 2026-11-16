@@ -136,7 +136,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		LEARN_MODE_DESCRIPTION: `Automatically writes measured server durations & distances to skill_data.json (developer option, only in this file, then !${CMD} reload). Prediction is OFF while learning!`
 	}, DEF.OMNI ? {
 		OMNI: false,
-		OMNI_DESCRIPTION: `Omnidirectional skills: with W / A / S / D held, backsteps, Teleport Jaunt, dashes ... go in that direction (like the mod "omnidirectional" - remove that mod when you use this). Off by default (!${CMD} omni)`
+		OMNI_DESCRIPTION: `Omnidirectional skills: with W / A / S / D held, backsteps, Teleport Jaunt, dashes ... go in that direction (like the mod "omnidirectional" - remove that mod when you use this). Other keys (e.g. AZERTY) for all classes: !sp omnikeys zqsd. Off by default (!${CMD} omni)`
 	} : {}, DEF.EXTRA_CONFIG || {}, {
 		SKILL_PREDICTION: Object.fromEntries(Object.keys(SKILL_SWITCHES).map(k => [k, true])),
 		SKILL_PREDICTION_DESCRIPTION: `Prediction per skill: false = this skill goes to the server without prediction (like without the mod), all other skills stay predicted. Change with !${CMD} disable <skill> / !${CMD} enable <skill>`
@@ -2504,7 +2504,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 			}
 			config.OMNI = !config.OMNI; saveConfig();
 			if (!config.OMNI) omni.stop();
-			return sendChat(`Omnidirectional skills: ${formatState(config.OMNI)}${config.OMNI ? ' - hold W / A / S / D to send backsteps, Teleport Jaunt, dashes ... that way' : ''}`);
+			return sendChat(`Omnidirectional skills: ${formatState(config.OMNI)}${config.OMNI ? ` - hold ${omni.keyLabel()} to send backsteps, Teleport Jaunt, dashes ... that way` : ''}`);
 		}
 		if (sub === 'gate') {
 			gateFix = !gateFix;
@@ -2557,7 +2557,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		const st = (s) => (s ? '<font color="#00FF88">[ON]</font>' : '<font color="#FF5555">[OFF]</font>');
 		const c = (cmd, label, state) => `<font color="#FFD700">!${CMD} ${cmd}</font> ${label}${state === undefined ? '' : ' ' + st(state)}`;
 		const offSkills = Object.keys(SKILL_SWITCHES).filter(n => (config.SKILL_PREDICTION || {})[n] === false);
-		sendChat(`Commands: ${c('on/off', 'prediction', enabled)} | ${c('disable/enable [skill]', 'prediction of one skill')}${offSkills.length ? ' (off: ' + offSkills.join(', ') + ')' : ''}${DEF.OMNI ? ' | ' + c('omni', 'WASD direction for movement skills', config.OMNI) : ''} | ${c('bug [count] [note]', 'save bug report')}`);
+		sendChat(`Commands: ${c('on/off', 'prediction', enabled)} | ${c('disable/enable [skill]', 'prediction of one skill')}${offSkills.length ? ' (off: ' + offSkills.join(', ') + ')' : ''}${DEF.OMNI ? ' | ' + c('omni', `${omni.keyNames().toUpperCase()} direction for movement skills`, config.OMNI) : ''} | ${c('bug [count] [note]', 'save bug report')}`);
 		if (HAS_LOCKON) {
 			sendChat(`Lock-on: ${c('lockon', 'instant lock-on', config.INSTANT_LOCKON)} | ${c('lockcast', 'cast prediction', config.PREDICT_LOCKON)}`);
 		}
