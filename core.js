@@ -119,7 +119,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		PREDICT_LOCKON_DESCRIPTION: `Predicts the cast after a lock-on. The targeting itself always runs through the server (!${CMD} lockcast)`
 	} : {}, {
 		AUTO_GLYPH_SYNC: true,
-		AUTO_GLYPH_SYNC_DESCRIPTION: `Applies known speed glyphs and automatically adapts to glyphs/buffs that make a skill faster (!${CMD} glyphsync)`
+		AUTO_GLYPH_SYNC_DESCRIPTION: `Applies known glyphs (speed, movement distance) and automatically adapts to glyphs/buffs that make a skill faster (!${CMD} glyphsync)`
 	}, HAS_LOCKON ? {
 		LOCKON_TIMEOUT_CANCEL: true,
 		LOCKON_TIMEOUT_CANCEL_DESCRIPTION: 'A lock-on that is held until its time limit goes on cooldown. The mod cancels it shortly before the limit instead, so there is no cooldown',
@@ -378,6 +378,17 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		}
 		return m;
 	}
+	// glyphs that change how far a skill moves the character (e.g. less recoil)
+	function knownGlyphDistance(skillId) {
+		if (!config.AUTO_GLYPH_SYNC) return 1;
+		let m = 1;
+		const g = groupOf(skillId);
+		for (const [crest, eff] of Object.entries(DEF.GLYPHS || {})) {
+			if (!eff.distance || !(eff.groups || []).includes(g) || (eff.subs && !eff.subs.includes(subOf(skillId))) || !isGlyph(Number(crest))) continue;
+			m *= eff.distance;
+		}
+		return m;
+	}
 	function knownChargeGlyph() {
 		if (!config.AUTO_GLYPH_SYNC) return 1;
 		let m = 1;
@@ -443,6 +454,13 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 
 	let animMoving = { skillId: 0, moving: false };
 	function animSeqFor(skillId, stage) {
+		// a glyph that changes the movement: the client animates the distance from animSeq, without it the full normal distance
+		if (config.AUTO_GLYPH_SYNC && stage === 0) {
+			for (const [crest, eff] of Object.entries(DEF.GLYPHS || {})) {
+				if (!eff.animSeq || !(eff.groups || []).includes(groupOf(skillId)) || (eff.subs && !eff.subs.includes(subOf(skillId))) || !isGlyph(Number(crest))) continue;
+				return eff.animSeq.map(x => Object.assign({}, x));
+			}
+		}
 		const fam = familyDef(skillId);
 		if (!fam || !fam.animSeq) return [];
 		if (animMoving.moving && animMoving.skillId === skillId) return [];
@@ -589,7 +607,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		};
 		action = a;
 
-		const dist = opts.distance || 0;
+		const dist = (opts.distance || 0) * knownGlyphDistance(skillId);
 		if (opts.dest) a.dest = { x: opts.dest.x, y: opts.dest.y, z: opts.dest.z };
 		else if (dist) a.dest = { x: start.x + Math.cos(w) * dist, y: start.y + Math.sin(w) * dist, z: start.z };
 
@@ -1619,7 +1637,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		} else {
 			data[target.prop] = smooth(data[target.prop], measured);
 		}
-		if (target.dist && Math.abs(along) > 30) data.distance = smooth(Math.abs(data.distance || 0), Math.abs(along)) * Math.sign(along);
+		if (target.dist && Math.abs(along) > 30) data.distance = smooth(Math.abs(data.distance || 0), Math.round(Math.abs(along) / knownGlyphDistance(rec.id))) * Math.sign(along);
 		saveSkillData();
 		sendChat(`<font color="#00FF88">[Learn]</font> ${data.name} updated in skill_data.json`);
 	}

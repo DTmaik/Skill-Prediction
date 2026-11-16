@@ -68,7 +68,10 @@ const FAMILIES = {
 };
 
 const GLYPHS = {
-	30004: { name: 'Bombardment cast speed', groups: [2], subs: [1], speed: 1.25 }
+	30004: { name: 'Bombardment cast speed', groups: [2], subs: [1], speed: 1.25 },
+	// Slick Scattershot: less recoil, the server moves the character 64.8 instead of 108 back
+	30007: { name: 'Slick Scattershot recoil', groups: [3], distance: 0.6, animSeq: [
+		{ duration: 394, xyRate: 1, zRate: 1, distance: 0 }, { duration: 111, xyRate: 1, zRate: 1, distance: 0 }, { duration: 1333, xyRate: 1.8, zRate: 1, distance: 64.8 }] }
 };
 
 const ABN_BLAST_BUFF = 10152011;
