@@ -1298,7 +1298,8 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		const stageIdx = event.stage - 1;
 		const measured = now - (c.serverLast || c.serverStart);
 		c.serverLast = now;
-		const expected = chargeStageTime(c.stages[stageIdx] || 0, c) / chargeCorrection;
+		// compare without the safety margin, else the learned factor ends up too fast and eats the margin
+		const expected = (chargeStageTime(c.stages[stageIdx] || 0, c) - (c.margin || 0)) / chargeCorrection;
 		if (expected > 50 && measured > 50) {
 			const corr = Math.round((measured / expected) * 100) / 100;
 			if (corr > 0.5 && corr < 1.6 && Math.abs(corr - chargeCorrection) > 0.05) {
@@ -1479,6 +1480,11 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		if (blockGrant) {
 			if (lastSpoofedGrant !== granted && groupOf(lastSpoofedGrant) === groupOf(granted)) {
 				grantFix = { from: lastSpoofedGrant, to: granted, until: Date.now() + 1000, sent: false };
+				// the release came before the server reached that charge level: the learned charge speed is too fast
+				if (subOf(granted) < subOf(lastSpoofedGrant) && chargeCorrection < 1) {
+					chargeCorrection = 1;
+					recordPacket('MOD', 'Charge speed correction reset (release came before the server charge level)', { skill: skillLabel(granted) });
+				}
 				if (lastReleaseRequest && getSkillId(lastReleaseRequest.skill) === lastSpoofedGrant && Date.now() - (lastReleaseRequest.at || 0) < 1000) {
 					grantFix.sent = true;
 					const pk = (lastStartReq && getSkillId(lastStartReq.event.skill) === lastSpoofedGrant) ? lastStartReq : { name: 'C_START_SKILL', version: 7 };
