@@ -93,6 +93,22 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 	}
 	const SKILL_DATA_PATH = path.join(dataDir, 'skill_data.json');
 
+	// per skill switch: name -> skill groups (placeholder names and shared entries use the short data key)
+	const switchName = (s) => String(s || '').toLowerCase().replace(/\(.*?\)/g, '').replace(/[^a-z0-9]/g, '');
+	const SKILL_SWITCHES = {};
+	const SWITCH_OF_GROUP = {};
+	const SWITCH_LABEL = {};
+	for (const [g, fam] of Object.entries(DEF.FAMILIES || {})) {
+		if (!fam || fam.mode === 'passthrough') continue;
+		const d = (DEF.DEFAULT_SKILLS || {})[fam.key];
+		const full = d && d.name && !/^Skill \d/.test(d.name) && !d.name.includes('/') ? d.name : null;
+		const name = switchName(full || fam.key);
+		if (!name) continue;
+		(SKILL_SWITCHES[name] = SKILL_SWITCHES[name] || []).push(Number(g));
+		SWITCH_OF_GROUP[g] = name;
+		if (!SWITCH_LABEL[name]) SWITCH_LABEL[name] = full ? full.replace(/\s*\(.*?\)/g, '') : name;
+	}
+
 	const DEFAULT_CONFIG = Object.assign({
 		GLOBAL_LATENCY: 0,
 		GLOBAL_LATENCY_DESCRIPTION: 'Your lowest usual ping in ms (shortens cooldowns by this value). Set it for all classes at once with !sp ping <ms>'
@@ -121,7 +137,10 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 	}, DEF.OMNI ? {
 		OMNI: false,
 		OMNI_DESCRIPTION: `Omnidirectional skills: with W / A / S / D held, backsteps, Teleport Jaunt, dashes ... go in that direction (like the mod "omnidirectional" - remove that mod when you use this). Off by default (!${CMD} omni)`
-	} : {}, DEF.EXTRA_CONFIG || {});
+	} : {}, DEF.EXTRA_CONFIG || {}, {
+		SKILL_PREDICTION: Object.fromEntries(Object.keys(SKILL_SWITCHES).map(k => [k, true])),
+		SKILL_PREDICTION_DESCRIPTION: `Prediction per skill: false = this skill goes to the server without prediction (like without the mod), all other skills stay predicted. Change with !${CMD} disable <skill> / !${CMD} enable <skill>`
+	});
 
 	let config = Object.assign({}, DEFAULT_CONFIG);
 	let skills = JSON.parse(JSON.stringify(DEF.DEFAULT_SKILLS));
@@ -177,6 +196,8 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 					if (key.endsWith('_DESCRIPTION')) config[key] = DEFAULT_CONFIG[key];
 				}
 
+				const sw = (loaded.SKILL_PREDICTION && typeof loaded.SKILL_PREDICTION === 'object') ? loaded.SKILL_PREDICTION : {};
+				config.SKILL_PREDICTION = Object.fromEntries(Object.keys(SKILL_SWITCHES).map(k => [k, sw[k] !== false]));
 				for (const key of Object.keys(config)) {
 					if (DEFAULT_CONFIG[key] === undefined) delete config[key];
 				}
@@ -877,6 +898,16 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 	function markUnpredicted(sid) {
 		unpredictedAt[groupOf(sid)] = Date.now();
 	}
+	const skillOff = (sid) => { const n = SWITCH_OF_GROUP[groupOf(sid)]; return Boolean(n) && (config.SKILL_PREDICTION || {})[n] === false; };
+	// a switched off skill goes to the server like without the mod (the class may delay it behind a held request)
+	function passOff(name, version, event, sid) {
+		recordPacket('MOD', 'Sent without prediction (skill switched off)', { skill: skillLabel(sid) });
+		cancelChargeAndHold(sid);
+		lastSkill = sid; lastEvent = event;
+		markUnpredicted(sid);
+		if (CLS.passOff && CLS.passOff(name, version, event) === true) return false;
+		return undefined;
+	}
 	// Abdull
 	function handleStart(name, version, event, allowRetry) {
 		if (!predicting()) return;
@@ -884,7 +915,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		const res = handleStartInner(name, version, event, allowRetry);
 		const sid = getSkillId(event.skill);
 		const predicted = Boolean(action && action.requestedAt >= t0 && action.requestId === sid);
-		if (res !== false && !predicted && isPlayerSkill(event.skill)) markUnpredicted(sid);
+		if ((res !== false || skillOff(sid)) && !predicted && isPlayerSkill(event.skill)) markUnpredicted(sid);
 		else delete unpredictedAt[groupOf(sid)];
 		return res;
 	}
@@ -899,6 +930,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		}
 		const sid = getSkillId(event.skill);
 		const fam = familyDef(sid);
+		if (isPlayerSkill(event.skill) && skillOff(sid)) return passOff(name, version, event, sid);
 		if (isPlayerSkill(event.skill) && !BLACKLIST.has(sid)) {
 			const dropReason = shouldDrop(sid);
 			if (dropReason) {
@@ -1120,6 +1152,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 	hook('C_START_TARGETED_SKILL', 6, (event) => {
 		if (!predicting() || inReaction()) return;
 		const sid = getSkillId(event.skill);
+		if (skillOff(sid)) return passOff('C_START_TARGETED_SKILL', 6, event, sid);
 		if (CLS.targeted) {
 			const verdict = CLS.targeted(event, { sid, fam: familyDef(sid) });
 			if (verdict === 'drop') return false;
@@ -1364,6 +1397,15 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 			lastPresses[base] = { down: copyEvent(event), up: null, at: Date.now() };
 		} else if (lastPresses[baseOf(sid)]) {
 			lastPresses[baseOf(sid)].up = copyEvent(event);
+		}
+		if (isPlayerSkill(event.skill) && skillOff(sid)) {
+			if (event.press) {
+				recordPacket('MOD', 'Key press sent without prediction (skill switched off)', { skill: skillLabel(sid) });
+				cancelChargeAndHold(sid);
+				lastSkill = sid; lastEvent = event;
+				markUnpredicted(sid);
+			}
+			return;
 		}
 		if (event.press && isPlayerSkill(event.skill) && !BLACKLIST.has(sid)) {
 			const dropReason = shouldDrop(sid);
@@ -2097,6 +2139,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		const sid = getSkillId(event.skill);
 		if (lockTrack && groupOf(sid) === lockTrack.group) lockTrack.pending.add(String(event.target));
 		if (!predicting() || !config.INSTANT_LOCKON) return;
+		if (skillOff(sid)) return;
 		if (petIds.has(String(event.target))) return;
 		if (lockRefused(event.target)) return;
 		if ((DEF.PARTY_LOCK_GROUPS || []).includes(groupOf(sid))) {
@@ -2419,6 +2462,24 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 			`learned: ${learned.length ? learned.join(', ') : 'nothing'} | active glyph IDs: ${active.length ? active.join(', ') : 'none known'}`;
 	}
 
+	function skillSwitchCommand(on, words) {
+		const names = Object.keys(SKILL_SWITCHES);
+		// green = predicted, red = switched off
+		const colored = (n) => `<font color="${(config.SKILL_PREDICTION || {})[n] === false ? '#FF5555' : '#00FF88'}">${n}</font>`;
+		const listNames = () => { for (let i = 0; i < names.length; i += 10) sendChat(`Skills: ${names.slice(i, i + 10).map(colored).join(', ')}`); };
+		const want = switchName(words.join(''));
+		if (!want) { sendChat(`Usage: !${CMD} ${on ? 'enable' : 'disable'} <skill>`); return listNames(); }
+		const hits = SKILL_SWITCHES[want] ? [want] : names.filter(n => n.includes(want));
+		if (hits.length !== 1) {
+			sendChat(hits.length ? `"${words.join(' ')}" fits more than one skill: ${hits.join(', ')}` : `Unknown skill "${words.join(' ')}"`);
+			return hits.length ? undefined : listNames();
+		}
+		const name = hits[0];
+		config.SKILL_PREDICTION = Object.assign({}, config.SKILL_PREDICTION, { [name]: on });
+		saveConfig();
+		sendChat(`${SWITCH_LABEL[name]} prediction: ${formatState(on)}`);
+	}
+
 	const commandKeys = (cmd) => cmd.keys || [cmd.key];
 	const commandState = (cmd) => commandKeys(cmd).every(k => (cmd.invert ? !config[k] : Boolean(config[k])));
 
@@ -2458,6 +2519,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 			saveConfig();
 			return sendChat(`Learn mode: ${formatState(config.LEARN_MODE)}${config.LEARN_MODE ? ' - server durations are written to skill_data.json, the prediction is OFF until you switch it off again' : ''}`);
 		}
+		if (sub === 'disable' || sub === 'enable') return skillSwitchCommand(sub === 'enable', args.slice(1));
 		if (CLS.command && CLS.command(sub, args) === true) return;
 		if (sub === 'glyphsync') return toggle('AUTO_GLYPH_SYNC', 'Glyph handling');
 		if (sub === 'glyph') return sendChat(glyphInfo());
@@ -2494,7 +2556,8 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 
 		const st = (s) => (s ? '<font color="#00FF88">[ON]</font>' : '<font color="#FF5555">[OFF]</font>');
 		const c = (cmd, label, state) => `<font color="#FFD700">!${CMD} ${cmd}</font> ${label}${state === undefined ? '' : ' ' + st(state)}`;
-		sendChat(`Commands: ${c('on/off', 'prediction', enabled)}${DEF.OMNI ? ' | ' + c('omni', 'WASD direction for movement skills', config.OMNI) : ''} | ${c('bug [count] [note]', 'save bug report')}`);
+		const offSkills = Object.keys(SKILL_SWITCHES).filter(n => (config.SKILL_PREDICTION || {})[n] === false);
+		sendChat(`Commands: ${c('on/off', 'prediction', enabled)} | ${c('disable/enable [skill]', 'prediction of one skill')}${offSkills.length ? ' (off: ' + offSkills.join(', ') + ')' : ''}${DEF.OMNI ? ' | ' + c('omni', 'WASD direction for movement skills', config.OMNI) : ''} | ${c('bug [count] [note]', 'save bug report')}`);
 		if (HAS_LOCKON) {
 			sendChat(`Lock-on: ${c('lockon', 'instant lock-on', config.INSTANT_LOCKON)} | ${c('lockcast', 'cast prediction', config.PREDICT_LOCKON)}`);
 		}

@@ -923,6 +923,19 @@ function setup(api) {
 			leashUntil = 0;
 			scSpeed = 1;
 		},
+		// a skill without prediction must not reach the server before a held block release or held skill
+		passOff(name, version, event) {
+			const up = pressUpSendAt(pressHeld);
+			let at = up && up !== Infinity ? up + 10 : 0;
+			for (const h of held) at = Math.max(at, (h.sendAt || 0) + 5);
+			if (at <= Date.now()) return false;
+			const ev = api.copyEvent(event);
+			api.setTimeout(() => {
+				api.recordPacket('MOD->S', name + ' [skill without prediction sent after the held request]', { skill: api.skillLabel(getSkillId(ev.skill)) });
+				api.dispatch.toServer(name, version, ev);
+			}, at - Date.now());
+			return true;
+		},
 		bugState() {
 			return `combo=${comboStep} block=${blockBase} defended=${defended ? 1 : 0} leash=${Date.now() < leashUntil ? 1 : 0} stamina=${stamina} sc=${scSpeed}`;
 		}

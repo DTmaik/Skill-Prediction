@@ -27,6 +27,7 @@ it shows all options of that class and whether they are on.
 | --- | --- |
 | `!<class>` | List of options with their state |
 | `!<class> on` / `off` | Turn it on or off |
+| `!<class> disable <skill>` / `enable <skill>` | Turn the prediction of one skill off or on, for example `!lancer disable backstep`. That skill then works like without the mod, all others stay predicted. Saved in the config (`SKILL_PREDICTION`). Without a name it lists the skill names |
 | `!<class> omni` | Omnidirectional skills: hold W, A, S or D with Backstep, Teleport Jaunt, Fiery Escape, a charging dash and similar, and the skill goes that way (off by default, not for Berserker and Reaper) |
 | `!<class> bug [note]` | Save a log for bug reports |
 | `!<class> reload` | Read the config again after editing it by hand |
