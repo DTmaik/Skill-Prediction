@@ -1023,7 +1023,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		const holding = holdMs > 0;
 		const isRelease = fam && fam.mode === 'charge' && (fam.releaseSubs || [10, 11, 12]).includes(subOf(sid));
 		const retryMode = isRelease ? (fam && fam.releaseRetry) : (fo && fo.retry !== undefined ? fo.retry : RETRY_DELAYS);
-		if (player && fam && fam.mode !== 'passthrough' && (retryMode === 'confirm' || retryMode === 'track')) trackRequest(name, version, event, allowRetry && retryMode === 'confirm');
+		if (player && fam && fam.mode !== 'passthrough' && (retryMode === 'confirm' || retryMode === 'track')) trackRequest(name, version, event, allowRetry && retryMode === 'confirm', holding ? holdMs : 0);
 		const retry = fo && fo.retry !== undefined ? fo.retry : RETRY_DELAYS;
 		if (!holding && allowRetry && player && fam && !isRelease && Array.isArray(retry) && retry.length) scheduleRetries(name, version, event, retry);
 		if (!holding && allowRetry && player && isRelease && Array.isArray(fam.releaseRetry)) scheduleReleaseRetries(name, version, event, fam);
@@ -1064,11 +1064,12 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 	}
 
 	let req = null;
-	function trackRequest(name, version, event, resend) {
+	// delay: the request is held back that long first, the resend counts from when it really goes out
+	function trackRequest(name, version, event, resend, delay = 0) {
 		const sid = getSkillId(event.skill);
-		const r = { group: groupOf(sid), sid, at: Date.now(), copy: resend ? { name, version, event: copyEvent(event) } : null, retries: 0, copies: 0, rejects: 0, confirmed: false };
+		const r = { group: groupOf(sid), sid, at: Date.now() + delay, copy: resend ? { name, version, event: copyEvent(event) } : null, retries: 0, copies: 0, rejects: 0, confirmed: false };
 		req = r;
-		if (resend) setTimeout(() => { if (r.retries === 0) resendRequest(r); }, estimateRtt() + 80);
+		if (resend) setTimeout(() => { if (r.retries === 0) resendRequest(r); }, delay + estimateRtt() + 80);
 		return r;
 	}
 	// Soaria

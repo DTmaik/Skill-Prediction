@@ -156,6 +156,26 @@ function setup(api) {
 
 	let lastReloadAt = 0, lastReloadId = 0, reloadBuffUntil = 0, reloadBuffSeenAt = 0, reloadEndsAt = 0, rollRanOutAt = 0;
 	let reloadQueue = null, reloadQueueTimer = null;
+	// An arrow chain (02 -> S_CONNECT_SKILL_ARROW -> client asks for +30) starts on the server ~2 RTT after our animation instead of 1 RTT:
+	// the next skill would reach the server too early (refused). lagAct = our action whose server copy runs behind by extra ms (beyond the RTT),
+	// the next request is held by that much; its own server start is measured again. Cleared when the server ends it without a new request.
+	let arrowChainReqAt = 0, lagAct = null, lagPend = null;
+	const ARROW_LAG_MIN = 20, ARROW_LAG_MAX = 300;
+	function measureLag(a, serverId, why) {
+		const extra = Date.now() - a.startedAt - api.estimateRtt();
+		lagAct = extra > ARROW_LAG_MIN ? { a, serverId, extra: Math.min(ARROW_LAG_MAX, Math.round(extra)) } : null;
+		if (lagAct) api.recordPacket('MOD', `Server runs behind our animation (${why})`, { skill: api.skillLabel(a.skillId), extra: lagAct.extra });
+	}
+	function lagDelay(sid) {
+		const a = api.action();
+		if (!lagAct || a !== lagAct.a || groupOf(sid) === groupOf(a.skillId) || groupOf(sid) === 40) return 0;
+		lagPend = { sid, at: Date.now() };
+		return lagAct.extra;
+	}
+	function rollRequestDelay(sid) {
+		if (groupOf(sid) === 40 || !rollRanOutAt || rollRanOutAt < lastReloadAt) return 0;
+		return Math.max(0, reloadEndsAt + ROLL_END_MARGIN - Date.now());
+	}
 	function clearReloadQueue() { api.clearTimeout(reloadQueueTimer); reloadQueue = null; }
 	function holdUntilReloadEnds(name, version, event) {
 		const wait = Math.max(0, reloadEndsAt + ROLL_END_MARGIN - Date.now());
@@ -170,10 +190,12 @@ function setup(api) {
 		}, wait);
 		api.recordPacket('MOD', 'HELD until Rolling Reload ends', { skill: api.skillLabel(getSkillId(event.skill)), ms: wait });
 	}
-	// Blast 01 and Arcane Barrage 01 cannot cancel the roll, their 02 versions can once the server opened the window (buff 10152010):
+	// Blast 01, Time Bomb 01, Arc Bomb 01 and Arcane Barrage 01 cannot cancel the roll, their 02 versions can once the server opened the window (buff 10152010):
 	// the client queues a press from early in the roll (or a held key) as 01 and sends 02 only after a refusal, so the mod sends 02 right away
+	let sent02 = null;
 	function send02(name, version, event) {
 		const ev = api.withSkillId(event, baseOf(getSkillId(event.skill)) + 2);
+		sent02 = { id: getSkillId(ev.skill), at: Date.now() };
 		api.recordPacket('MOD', '01 during the roll sent as 02 (window open)', { skill: api.skillLabel(getSkillId(ev.skill)) });
 		api.setTimeout(() => { if (api.predicting()) api.startSkill(name, version, ev); }, 0);
 	}
@@ -207,10 +229,19 @@ function setup(api) {
 		return 'done';
 	}
 
+	// the client sends Bombardment itself right when its roll ran out, the server roll ends ~1 RTT later and refuses it (ghost cast,
+	// spamming then cast it a second time): the request waits until the server roll ended, like requestDelay does for the others
 	function predictBombChannel(event, info) {
-		api.trackRequest(info.name, info.version, event, info.allowRetry);
+		const wait = rollRequestDelay(info.sid);
 		hideBlastBuff();
 		api.startAction(event, info.sid, { duration: 600000, fixedSpeed: true, prevEndType: 4, requestId: info.sid });
+		if (wait > 0) {
+			const ev = api.copyEvent(event);
+			api.holdRequest(info.name, info.version, ev, wait);
+			api.setTimeout(() => { if (api.predicting()) api.trackRequest(info.name, info.version, ev, info.allowRetry); }, wait);
+			return 'drop';
+		}
+		api.trackRequest(info.name, info.version, event, info.allowRetry);
 		return 'done';
 	}
 
@@ -378,7 +409,7 @@ function setup(api) {
 			blastReadyBuff = true;
 			const q = reloadQueue;
 			const a = running();
-			if (q && api.predicting() && a && groupOf(a.skillId) === 40 && (at(getSkillId(q.event.skill), 7, 1) || at(getSkillId(q.event.skill), 1, 1))) {
+			if (q && api.predicting() && a && groupOf(a.skillId) === 40 && (at(getSkillId(q.event.skill), 7, 1) || at(getSkillId(q.event.skill), 1, 1) || at(getSkillId(q.event.skill), 6, 1, 2) || at(getSkillId(q.event.skill), 10, 1, 2))) {
 				clearReloadQueue();
 				send02(q.name, q.version, q.event);
 			} else if (q && api.predicting() && a && groupOf(a.skillId) === 40 && at(getSkillId(q.event.skill), 4)) {
@@ -440,14 +471,26 @@ function setup(api) {
 			if (a && runningG === g && [1, 3, 15].includes(g)) return 'drop';
 			if (a && runningG === 7 && g === 7 && sub <= 2 && subOf(a.skillId) <= 2) return 'drop';
 
+			// the client's own 02 after the mod already sent 02 for its 01 (Time Bomb / Arc Bomb in the roll): one is enough
+			if (a && (g === 6 || g === 10) && runningG === g && sent02 && sent02.id === sid && Date.now() - sent02.at < 600) return 'drop';
 			if (a && runningG === g && [6, 10, 11, 13, 18, 19].includes(g) && sub !== 30 && sub !== 31) return 'pass';
 			if ([1, 3, 11].includes(g) && manaHeld) return 'drop';
 
+			// chain request of the client after S_CONNECT_SKILL_ARROW (e.g. Arc Bomb 106130 after 106102): sent unchanged, but the last skill
+			// stays the 01/02 request of the running animation, so a chain out of it is still recognized (Scattershot 36130 after Arc Bomb)
+			if (sub === 30 && a && runningG === g && g !== 11) {
+				api.holdRetries(g);
+				arrowChainReqAt = Date.now();
+				api.dispatch.toServer(info.name, info.version, event);
+				return 'drop';
+			}
 			if (sub === 30 && a && runningG === g) { api.holdRetries(g); return 'pass'; }
 
 			if (g === 4 && sub <= 2 && a && runningG === 4) return 'pass';
 
-			if (g === 1 && sub === 1 && a && runningG === 40) {
+			// Time Bomb and Arc Bomb work like Blast: 01 is refused during the roll, 02 cancels it once the window is open
+			// (Arc Bomb 02 in the window: the server answers with S_CONNECT_SKILL_ARROW and runs the chain 106130)
+			if ((g === 1 || g === 6 || g === 10) && sub === 1 && a && runningG === 40) {
 				if (info.name !== 'C_START_SKILL' || reloadEndsAt <= Date.now()) return 'pass';
 				if (!blastReadyBuff) { holdUntilReloadEnds(info.name, info.version, event); return 'drop'; }
 				clearReloadQueue();
@@ -463,7 +506,7 @@ function setup(api) {
 				pbHit2Consumed = true;
 				if (sub === 3) { clearReloadQueue(); sendSoon(info.name, info.version, ev, 'Point Blank hit 2 during the roll sent as hit 1 (chain)'); return 'drop'; }
 			}
-			const barrageCancel = g === 7 && sub === 2 && blastReadyBuff;
+			const barrageCancel = (g === 7 || g === 6 || g === 10) && sub === 2 && blastReadyBuff;
 			if (g === 7 && sub === 1 && a && runningG === 40 && info.name === 'C_START_SKILL' && blastReadyBuff) {
 				clearReloadQueue();
 				send02(info.name, info.version, event);
@@ -503,18 +546,27 @@ function setup(api) {
 		},
 
 		// the predicted roll ran out: the next skill shows at once, its request waits until the server roll ended
-		requestDelay(sid) {
-			if (groupOf(sid) === 40 || !rollRanOutAt || rollRanOutAt < lastReloadAt) return 0;
-			return Math.max(0, reloadEndsAt + ROLL_END_MARGIN - Date.now());
-		},
+		// an arrow chain before: the next request waits until the server caught up
+		requestDelay(sid) { return Math.max(rollRequestDelay(sid), lagDelay(sid)); },
 
 		serverStage(event, sid) {
+			if (event.stage === 0) {
+				const a = api.action();
+				if (subOf(sid) === 30 && a && a.skillId === sid && arrowChainReqAt >= a.startedAt) measureLag(a, event.id, 'arrow chain');
+				else if (lagPend && a && a.requestId === lagPend.sid && Date.now() - lagPend.at < 2000) { lagPend = null; measureLag(a, event.id, 'held request'); }
+				else if (lagAct && event.id !== lagAct.serverId) lagAct = null;
+			}
 			if (groupOf(sid) === 40 && event.stage === 0) {
 				lastReloadId = sid;
 				// the server started the roll late: its end moves later too
 				const end = Date.now() - api.estimateRtt() + api.skills.rollingReload.duration;
 				if (end > reloadEndsAt) reloadEndsAt = end;
 			}
+			return undefined;
+		},
+
+		serverEnd(event) {
+			if (lagAct && event.id === lagAct.serverId) lagAct = null;
 			return undefined;
 		},
 
