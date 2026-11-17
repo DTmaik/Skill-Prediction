@@ -76,10 +76,13 @@ const GLYPHS = {
 
 const ABN_BLAST_BUFF = 10152011;
 const ABN_BLAST_READY = 10152010;
+const ABN_PB_HIT2_WINDOW = 10152000;
 const ABN_RELOAD_SECOND = 910152073;
 const RELOAD_BUFF_MS = 4000;
 
 const RELOAD_CANCELLERS = [3, 11, 1, 40, 4, 2];
+// a request must not reach the server before its Rolling Reload ended (it would be refused)
+const ROLL_END_MARGIN = 30;
 const AB_PROJ_OFFSET = { forward: 14, side: 5, z: 30 };
 const BURST_MIN = 80, BURST_MAX = 300, BURST_SERVER_MS = 121;
 
@@ -151,11 +154,11 @@ function setup(api) {
 		} catch (e) {  }
 	})();
 
-	let lastReloadAt = 0, lastReloadId = 0, reloadBuffUntil = 0, reloadBuffSeenAt = 0, reloadEndsAt = 0;
+	let lastReloadAt = 0, lastReloadId = 0, reloadBuffUntil = 0, reloadBuffSeenAt = 0, reloadEndsAt = 0, rollRanOutAt = 0;
 	let reloadQueue = null, reloadQueueTimer = null;
 	function clearReloadQueue() { api.clearTimeout(reloadQueueTimer); reloadQueue = null; }
 	function holdUntilReloadEnds(name, version, event) {
-		const wait = Math.max(0, reloadEndsAt - Date.now());
+		const wait = Math.max(0, reloadEndsAt + ROLL_END_MARGIN - Date.now());
 		reloadQueue = { name, version, event: api.copyEvent(event) };
 		api.clearTimeout(reloadQueueTimer);
 		reloadQueueTimer = api.setTimeout(() => {
@@ -167,6 +170,21 @@ function setup(api) {
 		}, wait);
 		api.recordPacket('MOD', 'HELD until Rolling Reload ends', { skill: api.skillLabel(getSkillId(event.skill)), ms: wait });
 	}
+	// Barrage 01 cannot cancel the roll, Barrage 02 can once the server opened the window (buff 10152010):
+	// the client queues a press from early in the roll as 01 and sends 02 only after a refusal or timeout, so the mod sends 02 right away
+	function barrage02(name, version, event) {
+		const ev = api.withSkillId(event, baseOf(getSkillId(event.skill)) + 2);
+		api.recordPacket('MOD', 'Arcane Barrage 01 during the roll sent as 02 (window open)', { skill: api.skillLabel(getSkillId(ev.skill)) });
+		api.setTimeout(() => { if (api.predicting()) api.startSkill(name, version, ev); }, 0);
+	}
+	function sendSoon(name, version, ev, note) {
+		api.recordPacket('MOD', note, { skill: api.skillLabel(getSkillId(ev.skill)) });
+		api.setTimeout(() => { if (api.predicting()) api.startSkill(name, version, ev); }, 0);
+	}
+	// Point Blank during the roll: only hit 1 cancels it (as chain +30) and only once the window is open (buff 10152010).
+	// While the hit 2 buff runs the client asks for hit 2, which the server ignores during the roll: the mod sends hit 1 instead.
+	// The chain uses up the hit 2 buff on the server, so hit 2 after it goes to the server without prediction.
+	let lastPbHit1Sub = 1, pbHit2Consumed = false;
 	// Soaria
 	function predictReload(event, info) {
 		const sid = info.sid;
@@ -178,7 +196,9 @@ function setup(api) {
 		const target = second ? base + 30 : base;
 		api.trackRequest(info.name, info.version, event, info.allowRetry);
 		hideBlastBuff();
-		const a = api.startAction(event, target, { duration: d.duration, distance: second ? d.chainDistance : d.distance, fixedSpeed: true, prevEndType: 4, requestId: sid });
+		const a = api.startAction(event, target, { duration: d.duration, distance: second ? d.chainDistance : d.distance, fixedSpeed: true, prevEndType: 4, requestId: sid,
+			onEnd: () => { rollRanOutAt = Date.now(); } });
+		rollRanOutAt = 0;
 		api.applyLocks({ selfLock: api.GLOBAL_LOCK_DELAY }, sid, a);
 		lastReloadAt = now;
 		lastReloadId = target;
@@ -216,10 +236,17 @@ function setup(api) {
 	let abProjectilePredicted = false;
 	let storedProjectileHits = [];
 	let pendingDetonation = null;
+	// predicted ball id -> { real, endedAt, closed }: the client only knows the predicted id, the server only the real one
+	const balls = new Map();
+	const fakeOfReal = new Map();
+	// the server removes a ball that reached its end shortly after the hit report: a later detonation is ignored by the server
+	const DETONATE_AFTER_END_MS = 25;
 	function spawnPredictedBall(event) {
 		if (!api.config.AB_PROJ_SPOOF || !event || !event.dest) return;
 		const power = subOf(getSkillId(event.skill)) > 30;
 		projectileIdBase--;
+		balls.set(projectileIdBase, { real: 0, endedAt: 0, closed: false });
+		if (balls.size > 20) balls.delete(balls.keys().next().value);
 		realProjectileId = 0;
 		abProjectilePredicted = true;
 		pendingDetonation = null;
@@ -235,20 +262,25 @@ function setup(api) {
 		});
 	}
 	function endPredictedBall() {
+		const b = balls.get(projectileIdBase);
+		if (b) b.closed = true;
 		abProjectilePredicted = false;
 		storedProjectileHits = [];
 		pendingDetonation = null;
 		api.dispatch.toClient('S_END_USER_PROJECTILE', 4, { id: projectileIdBase, unk1: false, unk2: false, target: 0 });
 	}
 	api.tryHook('C_HIT_USER_PROJECTILE', 4, (event) => {
-		if (!api.predicting() || !api.config.AB_PROJ_SPOOF || Number(event.id) !== projectileIdBase) return;
+		if (!api.predicting() || !api.config.AB_PROJ_SPOOF) return;
+		const ball = balls.get(Number(event.id));
+		if (!ball) return;
 
 		if (Array.isArray(event.targets)) {
 			event.targets = event.targets.filter(t => t.gameId !== api.cid());
 			if (!event.targets.length && !event.end) return false;
 		}
-		if (realProjectileId !== 0) { event.id = realProjectileId; return true; }
-		storedProjectileHits.push(event);
+		if (event.end) ball.endedAt = Date.now();
+		if (ball.real) { event.id = ball.real; return true; }
+		if (Number(event.id) === projectileIdBase) storedProjectileHits.push(event);
 		return false;
 	});
 	api.tryHook('S_START_USER_PROJECTILE', 9, (event) => {
@@ -257,6 +289,10 @@ function setup(api) {
 		if (groupOf(pid) !== 7 || !(subOf(pid) === 20 || subOf(pid) === 50) || !abProjectilePredicted) return;
 		abProjectilePredicted = false;
 		realProjectileId = event.id;
+		const b = balls.get(projectileIdBase);
+		if (b) b.real = event.id;
+		fakeOfReal.set(String(event.id), projectileIdBase);
+		if (fakeOfReal.size > 20) fakeOfReal.delete(fakeOfReal.keys().next().value);
 		for (const hit of storedProjectileHits) { hit.id = realProjectileId; api.dispatch.toServer('C_HIT_USER_PROJECTILE', 4, hit); }
 		storedProjectileHits = [];
 		if (pendingDetonation) {
@@ -269,30 +305,53 @@ function setup(api) {
 		return false;
 	});
 
+	// the server ended the real ball: end the predicted one for the client too, else the client keeps it and detonates it later (ghost)
+	api.tryHook('S_END_USER_PROJECTILE', 4, (event) => {
+		if (!api.predicting() || !api.config.AB_PROJ_SPOOF) return;
+		const fake = fakeOfReal.get(String(event.id));
+		if (fake === undefined) return;
+		fakeOfReal.delete(String(event.id));
+		const b = balls.get(fake);
+		balls.delete(fake);
+		if (b && b.closed) return false;
+		event.id = fake;
+		return true;
+	});
+
 	api.tryHook('C_START_INSTANCE_SKILL_EX', 5, (event) => {
 		if (!api.predicting()) return;
+		const pid = Number(event.projectile);
+		const ball = api.config.AB_PROJ_SPOOF ? balls.get(pid) : undefined;
 		if (api.inReaction()) {
-			if (api.config.AB_PROJ_SPOOF && Number(event.projectile) === projectileIdBase) {
-				if (realProjectileId === 0) return false;
-				event.projectile = realProjectileId;
+			if (ball) {
+				if (!ball.real) return false;
+				event.projectile = ball.real;
 				return true;
 			}
 			return;
 		}
 		const sid = getSkillId(event.skill);
 		if (!at(sid, 7, 3, 4, 33) || api.isLocked(sid)) return;
+		if (ball && (ball.closed || (ball.endedAt && Date.now() - ball.endedAt > DETONATE_AFTER_END_MS))) {
+			api.recordPacket('MOD', 'Detonation not predicted (the ball already ended)', { skill: api.skillLabel(sid) });
+			api.markUnpredicted(sid, true);
+			if (!ball.real) return false;
+			event.projectile = ball.real;
+			return true;
+		}
 		api.lock(sid, api.GLOBAL_LOCK_DELAY);
 		hideBlastBuff();
 		api.startAction(event, sid, { duration: api.skills.arcaneBarrageDetonate.duration, prevEndType: 4, requestId: sid });
 		api.setLastSkill(sid, event);
-		const spoofed = api.config.AB_PROJ_SPOOF && Number(event.projectile) === projectileIdBase;
-		if (spoofed) api.dispatch.toClient('S_END_USER_PROJECTILE', 4, { id: projectileIdBase, unk1: false, unk2: false, target: 0 });
-		if (!spoofed) { api.trackRequest('C_START_INSTANCE_SKILL_EX', 5, event, true); return; }
-		if (realProjectileId !== 0) {
-			event.projectile = realProjectileId;
+		if (!ball) { api.trackRequest('C_START_INSTANCE_SKILL_EX', 5, event, true); return; }
+		ball.closed = true;
+		api.dispatch.toClient('S_END_USER_PROJECTILE', 4, { id: pid, unk1: false, unk2: false, target: 0 });
+		if (ball.real) {
+			event.projectile = ball.real;
 			api.trackRequest('C_START_INSTANCE_SKILL_EX', 5, event, true);
 			return true;
 		}
+		if (pid !== projectileIdBase) return false;
 		pendingDetonation = api.copyEvent(event);
 		return false;
 	});
@@ -315,7 +374,19 @@ function setup(api) {
 			reloadBuffSeenAt = Date.now();
 			reloadBuffUntil = reloadBuffSeenAt + Number(event.duration) - api.estimateRtt();
 		}
-		if (id === ABN_BLAST_READY) blastReadyBuff = true;
+		if (id === ABN_BLAST_READY) {
+			blastReadyBuff = true;
+			const q = reloadQueue;
+			const a = running();
+			if (q && api.predicting() && a && groupOf(a.skillId) === 40 && at(getSkillId(q.event.skill), 7, 1)) {
+				clearReloadQueue();
+				barrage02(q.name, q.version, q.event);
+			} else if (q && api.predicting() && a && groupOf(a.skillId) === 40 && at(getSkillId(q.event.skill), 4)) {
+				clearReloadQueue();
+				pbHit2Consumed = true;
+				sendSoon(q.name, q.version, q.event, 'Point Blank held in the roll sent (window open)');
+			}
+		}
 		if (api.predicting() && id === ABN_BLAST_BUFF && api.config.ABNORMALITY_TOGGLE) return false;
 	});
 	api.hook('S_ABNORMALITY_END', 1, { order: -10 }, (event) => {
@@ -325,6 +396,12 @@ function setup(api) {
 		if (id === ABN_BLAST_READY) blastReadyBuff = false;
 		if (api.predicting() && id === ABN_BLAST_BUFF && api.config.ABNORMALITY_TOGGLE) return false;
 	});
+	// a new or ended hit 2 buff: hit 2 is predicted normally again
+	for (const [name, ver] of [['S_ABNORMALITY_BEGIN', 3], ['S_ABNORMALITY_END', 1]]) {
+		api.hook(name, ver, { order: -9 }, (event) => {
+			if (event.target === api.cid() && Number(event.id) === ABN_PB_HIT2_WINDOW) pbHit2Consumed = false;
+		});
+	}
 	api.tryHook('S_PLAYER_CHANGE_STAMINA', 1, (event) => { if (api.enabled()) stamina = event.current; });
 
 	api.tryHook('C_NOTIMELINE_SKILL', 3, (event) => {
@@ -371,7 +448,22 @@ function setup(api) {
 			if (g === 4 && sub <= 2 && a && runningG === 4) return 'pass';
 
 			if (g === 1 && sub === 1 && a && runningG === 40) return 'pass';
-			if (a && runningG === 40 && info.name === 'C_START_SKILL' && !RELOAD_CANCELLERS.includes(g) && reloadEndsAt > Date.now()) {
+			// Arcane Barrage 02 cancels the roll once the server opened the window (buff 10152010), Barrage 01 is refused
+			if (g === 4 && (sub === 1 || sub === 2)) lastPbHit1Sub = sub;
+			if (g === 4 && sub === 3 && pbHit2Consumed) return 'pass';
+			if (g === 4 && sub <= 3 && a && runningG === 40 && info.name === 'C_START_SKILL' && reloadEndsAt > Date.now()) {
+				const ev = sub === 3 ? api.withSkillId(event, baseOf(sid) + lastPbHit1Sub) : event;
+				if (!blastReadyBuff) { holdUntilReloadEnds(info.name, info.version, ev); return 'drop'; }
+				pbHit2Consumed = true;
+				if (sub === 3) { clearReloadQueue(); sendSoon(info.name, info.version, ev, 'Point Blank hit 2 during the roll sent as hit 1 (chain)'); return 'drop'; }
+			}
+			const barrageCancel = g === 7 && sub === 2 && blastReadyBuff;
+			if (g === 7 && sub === 1 && a && runningG === 40 && info.name === 'C_START_SKILL' && blastReadyBuff) {
+				clearReloadQueue();
+				barrage02(info.name, info.version, event);
+				return 'drop';
+			}
+			if (a && runningG === 40 && info.name === 'C_START_SKILL' && !RELOAD_CANCELLERS.includes(g) && !barrageCancel && reloadEndsAt > Date.now()) {
 				holdUntilReloadEnds(info.name, info.version, event);
 				return 'drop';
 			}
@@ -404,8 +496,19 @@ function setup(api) {
 			return undefined;
 		},
 
+		// the predicted roll ran out: the next skill shows at once, its request waits until the server roll ended
+		requestDelay(sid) {
+			if (groupOf(sid) === 40 || !rollRanOutAt || rollRanOutAt < lastReloadAt) return 0;
+			return Math.max(0, reloadEndsAt + ROLL_END_MARGIN - Date.now());
+		},
+
 		serverStage(event, sid) {
-			if (groupOf(sid) === 40 && event.stage === 0) lastReloadId = sid;
+			if (groupOf(sid) === 40 && event.stage === 0) {
+				lastReloadId = sid;
+				// the server started the roll late: its end moves later too
+				const end = Date.now() - api.estimateRtt() + api.skills.rollingReload.duration;
+				if (end > reloadEndsAt) reloadEndsAt = end;
+			}
 			return undefined;
 		},
 
@@ -426,10 +529,13 @@ function setup(api) {
 			hideBlastBuff();
 			clearReloadQueue();
 			blastReadyBuff = false;
+			pbHit2Consumed = false;
 			manaHeld = false;
 			lastTarget = 0n;
 			storedProjectileHits = [];
 			pendingDetonation = null;
+			balls.clear();
+			fakeOfReal.clear();
 		},
 		destroy() { hideBlastBuff(); },
 		bugState() {

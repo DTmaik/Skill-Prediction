@@ -913,8 +913,11 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 	}
 
 	const unpredictedAt = {};
-	function markUnpredicted(sid) {
+	// exact: this skill passes through even while a predicted skill of its group runs (a class sent it without prediction)
+	const unpredictedExactAt = {};
+	function markUnpredicted(sid, exact) {
 		unpredictedAt[groupOf(sid)] = Date.now();
+		if (exact) unpredictedExactAt[sid] = Date.now();
 	}
 	const skillOff = (sid) => { const n = SWITCH_OF_GROUP[groupOf(sid)]; return Boolean(n) && (config.SKILL_PREDICTION || {})[n] === false; };
 	// a switched off skill goes to the server like without the mod (the class may delay it behind a held request)
@@ -1695,7 +1698,8 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		if (isPredictedServerSkill(sid)) {
 			const ua = unpredictedAt[groupOf(sid)] || 0;
 			const sentUnpredicted = Date.now() - ua < 1500 && (lastFakeFamilyAt[groupOf(sid)] || 0) < ua &&
-				!(action && !action.finished && groupOf(action.skillId) === groupOf(sid));
+				(!(action && !action.finished && groupOf(action.skillId) === groupOf(sid)) || Date.now() - (unpredictedExactAt[sid] || 0) < 1500);
+			if (sentUnpredicted && event.stage === 0) delete unpredictedExactAt[sid];
 			if (sentUnpredicted && event.stage === 0) delete unpredictedAt[groupOf(sid)];
 			if (sentUnpredicted || Date.now() - (lastFakeFamilyAt[groupOf(sid)] || 0) > FAKE_FAMILY_WINDOW) {
 				passthroughIds.add(event.id);
@@ -2713,7 +2717,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		get config() { return config; },
 		get skills() { return skills; },
 		saveConfig, sendChat, debugChat, recordPacket, skillLabel, formatState,
-		predicting, inReaction, holdRequest, skillExists, enabled: () => enabled, cid: () => cid, model: () => model, aspd: () => aspd,
+		predicting, inReaction, holdRequest, markUnpredicted, skillExists, enabled: () => enabled, cid: () => cid, model: () => model, aspd: () => aspd,
 		action: () => action, lastSkill: () => lastSkill, lastEvent: () => lastEvent,
 		setLastSkill: (id, ev) => { lastSkill = id; if (ev) lastEvent = ev; },
 		charge: () => charge, hold: () => hold,
