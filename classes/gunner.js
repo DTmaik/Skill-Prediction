@@ -170,11 +170,11 @@ function setup(api) {
 		}, wait);
 		api.recordPacket('MOD', 'HELD until Rolling Reload ends', { skill: api.skillLabel(getSkillId(event.skill)), ms: wait });
 	}
-	// Barrage 01 cannot cancel the roll, Barrage 02 can once the server opened the window (buff 10152010):
-	// the client queues a press from early in the roll as 01 and sends 02 only after a refusal or timeout, so the mod sends 02 right away
-	function barrage02(name, version, event) {
+	// Blast 01 and Arcane Barrage 01 cannot cancel the roll, their 02 versions can once the server opened the window (buff 10152010):
+	// the client queues a press from early in the roll (or a held key) as 01 and sends 02 only after a refusal, so the mod sends 02 right away
+	function send02(name, version, event) {
 		const ev = api.withSkillId(event, baseOf(getSkillId(event.skill)) + 2);
-		api.recordPacket('MOD', 'Arcane Barrage 01 during the roll sent as 02 (window open)', { skill: api.skillLabel(getSkillId(ev.skill)) });
+		api.recordPacket('MOD', '01 during the roll sent as 02 (window open)', { skill: api.skillLabel(getSkillId(ev.skill)) });
 		api.setTimeout(() => { if (api.predicting()) api.startSkill(name, version, ev); }, 0);
 	}
 	function sendSoon(name, version, ev, note) {
@@ -378,9 +378,9 @@ function setup(api) {
 			blastReadyBuff = true;
 			const q = reloadQueue;
 			const a = running();
-			if (q && api.predicting() && a && groupOf(a.skillId) === 40 && at(getSkillId(q.event.skill), 7, 1)) {
+			if (q && api.predicting() && a && groupOf(a.skillId) === 40 && (at(getSkillId(q.event.skill), 7, 1) || at(getSkillId(q.event.skill), 1, 1))) {
 				clearReloadQueue();
-				barrage02(q.name, q.version, q.event);
+				send02(q.name, q.version, q.event);
 			} else if (q && api.predicting() && a && groupOf(a.skillId) === 40 && at(getSkillId(q.event.skill), 4)) {
 				clearReloadQueue();
 				pbHit2Consumed = true;
@@ -447,7 +447,13 @@ function setup(api) {
 
 			if (g === 4 && sub <= 2 && a && runningG === 4) return 'pass';
 
-			if (g === 1 && sub === 1 && a && runningG === 40) return 'pass';
+			if (g === 1 && sub === 1 && a && runningG === 40) {
+				if (info.name !== 'C_START_SKILL' || reloadEndsAt <= Date.now()) return 'pass';
+				if (!blastReadyBuff) { holdUntilReloadEnds(info.name, info.version, event); return 'drop'; }
+				clearReloadQueue();
+				send02(info.name, info.version, event);
+				return 'drop';
+			}
 			// Arcane Barrage 02 cancels the roll once the server opened the window (buff 10152010), Barrage 01 is refused
 			if (g === 4 && (sub === 1 || sub === 2)) lastPbHit1Sub = sub;
 			if (g === 4 && sub === 3 && pbHit2Consumed) return 'pass';
@@ -460,7 +466,7 @@ function setup(api) {
 			const barrageCancel = g === 7 && sub === 2 && blastReadyBuff;
 			if (g === 7 && sub === 1 && a && runningG === 40 && info.name === 'C_START_SKILL' && blastReadyBuff) {
 				clearReloadQueue();
-				barrage02(info.name, info.version, event);
+				send02(info.name, info.version, event);
 				return 'drop';
 			}
 			if (a && runningG === 40 && info.name === 'C_START_SKILL' && !RELOAD_CANCELLERS.includes(g) && !barrageCancel && reloadEndsAt > Date.now()) {
