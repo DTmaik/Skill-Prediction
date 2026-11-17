@@ -156,21 +156,57 @@ function setup(api) {
 
 	let lastReloadAt = 0, lastReloadId = 0, reloadBuffUntil = 0, reloadBuffSeenAt = 0, reloadEndsAt = 0, rollRanOutAt = 0;
 	let reloadQueue = null, reloadQueueTimer = null;
-	// An arrow chain (02 -> S_CONNECT_SKILL_ARROW -> client asks for +30) starts on the server ~2 RTT after our animation instead of 1 RTT:
-	// the next skill would reach the server too early (refused). lagAct = our action whose server copy runs behind by extra ms (beyond the RTT),
-	// the next request is held by that much; its own server start is measured again. Cleared when the server ends it without a new request.
-	let arrowChainReqAt = 0, lagAct = null, lagPend = null;
-	const ARROW_LAG_MIN = 20, ARROW_LAG_MAX = 300;
-	function measureLag(a, serverId, why) {
+	// An arrow chain (02 -> S_CONNECT_SKILL_ARROW -> client asks for +30) starts on the server ~2 RTT after our animation instead of 1 RTT,
+	// so the next skill would reach the server too early (refused). The next skill is shown AND sent that much later, once: after it our
+	// animation and the server are in step again. (Holding only the requests and measuring again at every skill made the hold grow with the
+	// ping jitter - the RTT estimate is the minimum - and shifted Blast against Point Blank, which broke PB -> Blast -> PB.)
+	let arrowChainReqAt = 0, lagAct = null, lagQueue = null, lagTimer = null;
+	const ARROW_LAG_MIN = 20, ARROW_LAG_MAX = 250;
+	function measureLag(a, serverId) {
 		const extra = Date.now() - a.startedAt - api.estimateRtt();
 		lagAct = extra > ARROW_LAG_MIN ? { a, serverId, extra: Math.min(ARROW_LAG_MAX, Math.round(extra)) } : null;
-		if (lagAct) api.recordPacket('MOD', `Server runs behind our animation (${why})`, { skill: api.skillLabel(a.skillId), extra: lagAct.extra });
+		if (lagAct) api.recordPacket('MOD', 'Server runs behind our animation (arrow chain)', { skill: api.skillLabel(a.skillId), extra: lagAct.extra });
 	}
-	function lagDelay(sid) {
+	function clearLag() { api.clearTimeout(lagTimer); lagQueue = null; lagAct = null; }
+	// true: the request is taken over (shown + sent later)
+	function delayAfterArrow(info, event) {
+		const g = groupOf(info.sid);
+		if (lagQueue) {
+			if (g === lagQueue.chainGroup || g === 40) return false;
+			lagQueue.name = info.name; lagQueue.version = info.version; lagQueue.event = api.copyEvent(event);
+			return true;
+		}
 		const a = api.action();
-		if (!lagAct || a !== lagAct.a || groupOf(sid) === groupOf(a.skillId) || groupOf(sid) === 40) return 0;
-		lagPend = { sid, at: Date.now() };
-		return lagAct.extra;
+		if (!lagAct || a !== lagAct.a || g === groupOf(a.skillId) || g === 40) return false;
+		const wait = lagAct.extra;
+		lagAct = null;
+		queueStart(info, event, wait, groupOf(a.skillId), 'Next skill after the arrow chain shown + sent later (server behind)');
+		return true;
+	}
+	// shown AND sent after wait ms; a newer request of another group replaces it meanwhile (spam), the timer stays
+	function queueStart(info, event, wait, chainGroup, note) {
+		lagQueue = { chainGroup, name: info.name, version: info.version, event: api.copyEvent(event) };
+		api.recordPacket('MOD', note, { skill: api.skillLabel(info.sid), ms: wait });
+		api.clearTimeout(lagTimer);
+		lagTimer = api.setTimeout(() => {
+			const q = lagQueue;
+			lagQueue = null;
+			if (q && api.predicting()) api.startSkill(q.name, q.version, q.event);
+		}, wait);
+	}
+	// Blast during the Mana Missiles shot (96010/96011): the client allows it ~512 ms into its animation, the server refused it there and
+	// took it from ~610 ms on (sniff logs: refused at 512, accepted at 609/611/677). Without the mod the client animation starts 1 RTT late,
+	// which hides this; with the mod Blast reached the server too early (refused, retried ~165 ms later). Blast is shown + sent at that point.
+	const MANA_SHOT_BLAST_FROM = 605;
+	const NEXT_CAST_EARLY = 150;
+	function delayBlastInManaShot(info, event) {
+		if (groupOf(info.sid) !== 1 || info.name !== 'C_START_SKILL') return false;
+		const a = api.action();
+		if (!a || a.finished || !at(a.skillId, 9, 10, 11)) return false;
+		const wait = Math.round(MANA_SHOT_BLAST_FROM / (a.speed || 1) - (Date.now() - a.startedAt));
+		if (wait <= 0) return false;
+		queueStart(info, event, wait, 9, 'Blast during the Mana Missiles shot shown + sent later (server allows it later than the client)');
+		return true;
 	}
 	function rollRequestDelay(sid) {
 		if (groupOf(sid) === 40 || !rollRanOutAt || rollRanOutAt < lastReloadAt) return 0;
@@ -467,8 +503,18 @@ function setup(api) {
 			const runningG = a ? groupOf(a.skillId) : -1;
 			if (g === 11 && !isRocket(sid)) return 'pass';
 			if (!info.fam) return undefined;
+			if (delayAfterArrow(info, event)) return 'drop';
+			if (delayBlastInManaShot(info, event)) return 'drop';
 
-			if (a && runningG === g && [1, 3, 15].includes(g)) return 'drop';
+			if (a && runningG === g && [1, 3, 15].includes(g)) {
+				// the same skill again right before our animation ends is the next cast, not spam: the client times it from its own request,
+				// which is earlier than our animation when that was shown later (arrow chain / Mana shot) - shown + sent when it ends
+				const left = (a.endAt || 0) - Date.now();
+				if (info.name === 'C_START_SKILL' && left > 0 && left <= NEXT_CAST_EARLY) {
+					queueStart(info, event, left + 1, g, 'Same skill right before the end: shown + sent when it ends');
+				}
+				return 'drop';
+			}
 			if (a && runningG === 7 && g === 7 && sub <= 2 && subOf(a.skillId) <= 2) return 'drop';
 
 			// the client's own 02 after the mod already sent 02 for its 01 (Time Bomb / Arc Bomb in the roll): one is enough
@@ -546,14 +592,12 @@ function setup(api) {
 		},
 
 		// the predicted roll ran out: the next skill shows at once, its request waits until the server roll ended
-		// an arrow chain before: the next request waits until the server caught up
-		requestDelay(sid) { return Math.max(rollRequestDelay(sid), lagDelay(sid)); },
+		requestDelay: rollRequestDelay,
 
 		serverStage(event, sid) {
 			if (event.stage === 0) {
 				const a = api.action();
-				if (subOf(sid) === 30 && a && a.skillId === sid && arrowChainReqAt >= a.startedAt) measureLag(a, event.id, 'arrow chain');
-				else if (lagPend && a && a.requestId === lagPend.sid && Date.now() - lagPend.at < 2000) { lagPend = null; measureLag(a, event.id, 'held request'); }
+				if (subOf(sid) === 30 && a && a.skillId === sid && arrowChainReqAt >= a.startedAt) measureLag(a, event.id);
 				else if (lagAct && event.id !== lagAct.serverId) lagAct = null;
 			}
 			if (groupOf(sid) === 40 && event.stage === 0) {
@@ -588,6 +632,7 @@ function setup(api) {
 			clearReloadQueue();
 			blastReadyBuff = false;
 			pbHit2Consumed = false;
+			clearLag();
 			manaHeld = false;
 			lastTarget = 0n;
 			storedProjectileHits = [];
