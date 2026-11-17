@@ -941,6 +941,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		return res;
 	}
 	function handleStartInner(name, version, event, allowRetry) {
+		flushTapUp(getSkillId(event.skill));
 		if (grantFix && !grantFix.sent && getSkillId(event.skill) === grantFix.from && Date.now() < grantFix.until) {
 			grantFix.sent = true;
 			recordPacket('MOD->S', 'Release rewritten to the charge level the server granted', { from: skillLabel(grantFix.from), to: skillLabel(grantFix.to) });
@@ -1218,6 +1219,21 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 			}, delay);
 		}
 	}
+	// a charge / hold key pressed while the server still played another skill: all press retries can fall into that skill and are ignored
+	// (Berserker bug report: Thunder Strike pressed during Flatten #30, released after 1 s -> only the stage 0 shot). When the server ends that
+	// skill and has not started ours, the press goes out once more.
+	let pressResentFor = null;
+	function resendPressAfterServerEnd(endedSid) {
+		const copy = pressCopy;
+		if (!copy || pressResentFor === copy) return;
+		const sid = getSkillId(copy.skill);
+		if (groupOf(endedSid) === groupOf(sid) || !pressStillHeld(sid) || (serverSkillAckAt[sid] || 0) >= pressCopyAt) return;
+		// pressed less than one RTT ago: the press reaches the server after this end anyway (no duplicate)
+		if (Date.now() - pressCopyAt < estimateRtt()) return;
+		pressResentFor = copy;
+		recordPacket('MOD->S', 'C_PRESS_SKILL [press resent: the server ended the skill before]', { skill: skillLabel(sid), ended: skillLabel(endedSid) });
+		sendRetry('C_PRESS_SKILL', 4, copy);
+	}
 	function pressStillHeld(sid) {
 		return (charge && charge.skillId === sid && !charge.released) || (hold && hold.skillId === sid);
 	}
@@ -1381,6 +1397,9 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 	}
 
 	// DTmaik
+	// a resent tap whose release is not out yet: a new skill request sends the release first, else the new skill reaches the server
+	// while the resent press holds the block and is ignored (Berserker bug report: block tap in Evasive Smash, then Staggering Strike = ghost)
+	let tapUpPending = null;
 	function scheduleTapResend(sid, h, upEvent) {
 		const wait = (Number(config.GLOBAL_LATENCY) || 100) + 60;
 		const down = copyEvent(h.event);
@@ -1389,8 +1408,18 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 			if ((serverSkillAckAt[sid] || 0) >= h.pressAt || lastSkill !== sid) return;
 			recordPacket('MOD->S', 'C_PRESS_SKILL [tap resend: press was not confirmed]', { skill: skillLabel(sid) });
 			sendRetry('C_PRESS_SKILL', 4, down);
-			setTimeout(() => sendRetry('C_PRESS_SKILL', 4, up), 30);
+			const p = { sid, up, timer: null };
+			p.timer = setTimeout(() => { if (tapUpPending === p) tapUpPending = null; sendRetry('C_PRESS_SKILL', 4, up); }, 30);
+			tapUpPending = p;
 		}, Math.max(0, wait - (Date.now() - h.pressAt)));
+	}
+	function flushTapUp(sid) {
+		const p = tapUpPending;
+		if (!p || p.sid === sid) return;
+		tapUpPending = null;
+		clearTimeout(p.timer);
+		recordPacket('MOD->S', 'C_PRESS_SKILL release of the resent tap sent before the next skill', { skill: skillLabel(p.sid), next: skillLabel(sid) });
+		sendRetry('C_PRESS_SKILL', 4, p.up);
 	}
 
 	const forwardedPress = {};
@@ -1414,6 +1443,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		if (!predicting() || (event.press && inReaction() && isPlayerSkill(event.skill))) return;
 		const sid = getSkillId(event.skill);
 		const fam = familyDef(sid);
+		if (event.press) flushTapUp(sid);
 		noteRealLoc(event.loc);
 		if (event.press) {
 			const base = baseOf(sid);
@@ -1764,6 +1794,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		if (reaction && (event.id === reaction.id || !isPlayerSkill(event.skill))) reaction = null;
 		if (!predicting()) return;
 		const sid = getSkillId(event.skill);
+		resendPressAfterServerEnd(sid);
 		if (CLS.serverEnd) {
 			const verdict = CLS.serverEnd(event, sid);
 			if (verdict === false) return false;
