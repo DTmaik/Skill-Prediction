@@ -179,8 +179,11 @@ function setup(api) {
 	let comboStep = 0, comboReset = null;
 	let vortexUntil = 0;
 	let vortexBuffEndAt = 0;
-
-	const vortexReady = () => api.hasAbnormal(ABN_VORTEX) || (Date.now() < vortexUntil && vortexBuffEndAt < vortexUntil - VORTEX_WINDOW);
+	const VORTEX_CATEGORY = 1017;
+	let vortexCat = null;
+	const vortexReady = () => (vortexCat === null ? api.hasAbnormal(ABN_VORTEX) : vortexCat) ||
+		(Date.now() < vortexUntil && vortexBuffEndAt < vortexUntil - VORTEX_WINDOW);
+	function vortexAnswered() { if (vortexCat !== null) vortexUntil = 0; }
 	let blockHeld = false;
 	let blockChainUntil = 0;
 	let blockDefended = false;
@@ -232,6 +235,36 @@ function setup(api) {
 		const fam = api.familyDef(sid);
 		return Boolean(prev && fam && (fam.chains || []).some(ch => api.matchesAny(plain(prev.requestId || prev.skillId), ch.from)));
 	}
+
+	// a chain request the server ignored without any answer (it came before the chain point - bug report: Traverse Cut after
+	// Poison Blade, Scythe after Blade Draw): repeated every few ms while the server still plays the skill it chains from
+	const CHAIN_REPEAT_GAP = 50, CHAIN_REPEAT_MAX = 8;
+	let chainRepeat = null;
+	function armChainRepeat(sid, event, delay) {
+		if (chainRepeat) api.clearTimeout(chainRepeat.timer);
+		chainRepeat = null;
+		const src = api.action();
+		if (!src || !src.normDuration || !event) return;
+		const r = chainRepeat = { sid, g: groupOf(sid), src, srcGroup: groupOf(src.skillId), sentAt: Date.now() + delay, event: api.copyEvent(event), n: 0, timer: null };
+		const check = () => {
+			if (chainRepeat !== r) return;
+			chainRepeat = null;
+			if (!api.predicting() || api.serverAckAt(r.g) >= r.sentAt) return;
+			const sv = api.serverActive();
+			if (!sv || groupOf(sv.id) !== r.srcGroup || r.n >= CHAIN_REPEAT_MAX) return;
+			const svEnd = sv.at + r.src.normDuration / (r.src.speed || api.aspd() || 1);
+			if (Date.now() > svEnd - rttTyp() - 20) return;
+			r.n++;
+			api.recordPacket('MOD->S', 'C_START_SKILL [chain sent again: the server ignored it (before its chain point)]', { skill: api.skillLabel(r.sid), n: r.n });
+			api.sendRetry('C_START_SKILL', 7, r.event);
+			chainRepeat = r;
+			r.timer = api.setTimeout(check, CHAIN_REPEAT_GAP);
+		};
+		r.timer = api.setTimeout(check, Math.max(0, delay) + rttTyp() + 60);
+	}
+	api.hook('S_CANNOT_START_SKILL', 4, { order: -1000 }, (event) => {
+		if (chainRepeat && groupOf(getSkillId(event.skill)) === chainRepeat.g) { api.clearTimeout(chainRepeat.timer); chainRepeat = null; }
+	});
 
 	function holdAfterPredict(info, event, delay) {
 		if (!(delay > 0)) return 'done';
@@ -441,6 +474,29 @@ function setup(api) {
 		if (api.enabled()) stamina = Number(event.current);
 	});
 
+	// Vortex Slash is usable while the server has its skill category on (S_SKILL_CATEGORY 1017, sent with the Vortex buff 100400
+	// from Evasive Roll / Death from Above, off when the buff ends). Logs: while category 1023 is on (comes with buff 100700) a roll
+	// gives the buff but NOT category 1017 - the server then refuses Vortex Slash (SMT_SKILL_FAIL_CATEGORY), buff icon or not.
+	// The roll window below only covers the time until the server answered the roll; without category packets: the old buff logic.
+	api.tryHook('S_SKILL_CATEGORY', 3, (event) => {
+		if (!api.enabled() || Number(event.category) !== VORTEX_CATEGORY) return;
+		vortexCat = Boolean(event.enabled);
+		vortexUntil = 0;
+	});
+	api.hook('S_ABNORMALITY_BEGIN', 3, (event) => {
+		if (api.enabled() && event.target === api.cid() && Number(event.id) === ABN_VORTEX) vortexAnswered();
+	});
+	api.tryHook('S_ABNORMALITY_REFRESH', 1, (event) => {
+		if (api.enabled() && event.target === api.cid() && Number(event.id) === ABN_VORTEX) vortexAnswered();
+	});
+	api.hook('S_CANNOT_START_SKILL', 4, { order: -1000 }, (event) => {
+		const sid = getSkillId(event.skill);
+		if (groupOf(sid) === 17 && subOf(sid) === 0 && vortexReady()) {
+			vortexUntil = 0;
+			if (vortexCat !== null) vortexCat = false;
+			api.recordPacket('MOD', 'Vortex Slash refused: not predicted until the server enables it again', {});
+		}
+	});
 	api.hook('S_ABNORMALITY_END', 1, (event) => {
 		if (!api.enabled() || event.target !== api.cid()) return;
 		if (Number(event.id) === ABN_VORTEX) vortexBuffEndAt = Date.now();
@@ -464,8 +520,10 @@ function setup(api) {
 			return 1;
 		},
 
-		requestDelay(sid) {
-			const delay = requestHold(sid, chainFromPrev(sid));
+		requestDelay(sid, _running, event) {
+			const chain = chainFromPrev(sid);
+			const delay = requestHold(sid, chain);
+			if (chain) armChainRepeat(sid, event, delay);
 			pendingHold = delay > 0 ? { until: Date.now() + delay, at: Date.now() } : null;
 			return delay;
 		},
@@ -575,7 +633,8 @@ function setup(api) {
 			const g = groupOf(sid);
 			if (a && pendingHold && Date.now() - pendingHold.at < 5) a.heldUntil = pendingHold.until;
 			pendingHold = null;
-			if (g === 10 || g === 2) vortexUntil = Date.now() + VORTEX_WINDOW;
+			// until the server answers the roll (buff + category) Vortex Slash counts as ready
+			if (g === 10 || g === 2) vortexUntil = Date.now() + (vortexCat === null ? VORTEX_WINDOW : rttTyp() * 2 + 300);
 			if (g === 17 && subOf(sid) === 0) vortexUntil = 0;
 			if (g === 3) tobBlocked = false;
 			if (g === 2) clearBackstab();
@@ -627,6 +686,7 @@ function setup(api) {
 			resetCombo();
 			clearBackstab();
 			vortexUntil = 0;
+			vortexCat = null;
 			blockHeld = false;
 			blockChainUntil = 0;
 			blockDefended = false;
