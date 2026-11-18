@@ -156,6 +156,17 @@ function setup(api) {
 
 	let lastReloadAt = 0, lastReloadId = 0, reloadBuffUntil = 0, reloadBuffSeenAt = 0, reloadEndsAt = 0, rollRanOutAt = 0;
 	let reloadQueue = null, reloadQueueTimer = null;
+	// a held request goes out with the position the character has when it is sent, not the one from the key press (pressed mid roll,
+	// sent at the roll end = up to ~100 units behind the server position -> start position mismatch on the server):
+	// previous animation over -> its end point, still running -> the newest client position report after the press, else the press position
+	let lastNotify = null;
+	function freshEvent(ev, pressedAt) {
+		const e = api.copyEvent(ev);
+		const a = api.action();
+		if (!a || a.finished) { const l = api.currentLoc(e.loc); e.loc = { x: l.x, y: l.y, z: l.z }; }
+		else if (lastNotify && lastNotify.at > pressedAt) e.loc = { x: lastNotify.loc.x, y: lastNotify.loc.y, z: lastNotify.loc.z };
+		return e;
+	}
 	// An arrow chain (02 -> S_CONNECT_SKILL_ARROW -> client asks for +30) starts on the server ~2 RTT after our animation instead of 1 RTT,
 	// so the next skill would reach the server too early (refused). The next skill is shown AND sent that much later, once: after it our
 	// animation and the server are in step again. (Holding only the requests and measuring again at every skill made the hold grow with the
@@ -173,7 +184,7 @@ function setup(api) {
 		const g = groupOf(info.sid);
 		if (lagQueue) {
 			if (g === lagQueue.chainGroup || g === 40) return false;
-			lagQueue.name = info.name; lagQueue.version = info.version; lagQueue.event = api.copyEvent(event);
+			lagQueue.name = info.name; lagQueue.version = info.version; lagQueue.event = api.copyEvent(event); lagQueue.at = Date.now();
 			return true;
 		}
 		const a = api.action();
@@ -185,13 +196,13 @@ function setup(api) {
 	}
 	// shown AND sent after wait ms; a newer request of another group replaces it meanwhile (spam), the timer stays
 	function queueStart(info, event, wait, chainGroup, note) {
-		lagQueue = { chainGroup, name: info.name, version: info.version, event: api.copyEvent(event) };
+		lagQueue = { chainGroup, name: info.name, version: info.version, event: api.copyEvent(event), at: Date.now() };
 		api.recordPacket('MOD', note, { skill: api.skillLabel(info.sid), ms: wait });
 		api.clearTimeout(lagTimer);
 		lagTimer = api.setTimeout(() => {
 			const q = lagQueue;
 			lagQueue = null;
-			if (q && api.predicting()) api.startSkill(q.name, q.version, q.event);
+			if (q && api.predicting()) api.startSkill(q.name, q.version, freshEvent(q.event, q.at));
 		}, wait);
 	}
 	// Blast during the Mana Missiles shot (96010/96011): the client allows it ~512 ms into its animation, the server refused it there and
@@ -215,14 +226,14 @@ function setup(api) {
 	function clearReloadQueue() { api.clearTimeout(reloadQueueTimer); reloadQueue = null; }
 	function holdUntilReloadEnds(name, version, event) {
 		const wait = Math.max(0, reloadEndsAt + ROLL_END_MARGIN - Date.now());
-		reloadQueue = { name, version, event: api.copyEvent(event) };
+		reloadQueue = { name, version, event: api.copyEvent(event), at: Date.now() };
 		api.clearTimeout(reloadQueueTimer);
 		reloadQueueTimer = api.setTimeout(() => {
 			const q = reloadQueue;
 			reloadQueue = null;
 			if (!q || !api.predicting()) return;
 			api.recordPacket('MOD->S', 'Held request sent (Rolling Reload ended)', { skill: api.skillLabel(getSkillId(q.event.skill)) });
-			api.startSkill(q.name, q.version, q.event);
+			api.startSkill(q.name, q.version, freshEvent(q.event, q.at));
 		}, wait);
 		api.recordPacket('MOD', 'HELD until Rolling Reload ends', { skill: api.skillLabel(getSkillId(event.skill)), ms: wait });
 	}
@@ -447,11 +458,11 @@ function setup(api) {
 			const a = running();
 			if (q && api.predicting() && a && groupOf(a.skillId) === 40 && (at(getSkillId(q.event.skill), 7, 1) || at(getSkillId(q.event.skill), 1, 1) || at(getSkillId(q.event.skill), 6, 1, 2) || at(getSkillId(q.event.skill), 10, 1, 2))) {
 				clearReloadQueue();
-				send02(q.name, q.version, q.event);
+				send02(q.name, q.version, freshEvent(q.event, q.at));
 			} else if (q && api.predicting() && a && groupOf(a.skillId) === 40 && at(getSkillId(q.event.skill), 4)) {
 				clearReloadQueue();
 				pbHit2Consumed = true;
-				sendSoon(q.name, q.version, q.event, 'Point Blank held in the roll sent (window open)');
+				sendSoon(q.name, q.version, freshEvent(q.event, q.at), 'Point Blank held in the roll sent (window open)');
 			}
 		}
 		if (api.predicting() && id === ABN_BLAST_BUFF && api.config.ABNORMALITY_TOGGLE) return false;
@@ -608,6 +619,8 @@ function setup(api) {
 			}
 			return undefined;
 		},
+
+		notify(copy) { lastNotify = { loc: copy.loc, at: Date.now() }; },
 
 		serverEnd(event) {
 			if (lagAct && event.id === lagAct.serverId) lagAct = null;

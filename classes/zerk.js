@@ -448,6 +448,9 @@ function setup(api) {
 		if (!pendingSmash) return;
 		const ev = pendingSmash;
 		pendingSmash = null;
+		// released mid roll, sent at the server roll end: with the position the character has now (our roll animation is over)
+		const a = api.action();
+		if (!a || a.finished) { const l = api.currentLoc(ev.loc); ev.loc = { x: l.x, y: l.y, z: l.z }; }
 		api.dispatch.toServer('C_PRESS_SKILL', 4, ev);
 	}
 
