@@ -504,6 +504,15 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		(retryEchoes[sid] = retryEchoes[sid] || []).push(Date.now());
 		dispatch.toServer(name, version, data);
 	}
+	// a fresh request of the same skill: copies of an older request are answered within about one ping - anything older is stale
+	// (bug report: a late retry copy got accepted, its entry stayed, and 1.1 s later the real refusal of the next roll was hidden as
+	// its echo - no retry, no ghost protection)
+	function dropStaleEchoes(sid) {
+		const list = retryEchoes[sid];
+		if (!list || !list.length) return;
+		const maxAge = estimateRtt() * 2 + 250, now = Date.now();
+		retryEchoes[sid] = list.filter(t => now - t <= maxAge);
+	}
 	function consumeRetryEcho(sid) {
 		const list = retryEchoes[sid];
 		if (!list) return false;
@@ -942,6 +951,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 	}
 	function handleStartInner(name, version, event, allowRetry) {
 		flushTapUp(getSkillId(event.skill));
+		dropStaleEchoes(getSkillId(event.skill));
 		if (grantFix && !grantFix.sent && getSkillId(event.skill) === grantFix.from && Date.now() < grantFix.until) {
 			grantFix.sent = true;
 			recordPacket('MOD->S', 'Release rewritten to the charge level the server granted', { from: skillLabel(grantFix.from), to: skillLabel(grantFix.to) });
@@ -1443,7 +1453,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		if (!predicting() || (event.press && inReaction() && isPlayerSkill(event.skill))) return;
 		const sid = getSkillId(event.skill);
 		const fam = familyDef(sid);
-		if (event.press) flushTapUp(sid);
+		if (event.press) { flushTapUp(sid); dropStaleEchoes(sid); }
 		noteRealLoc(event.loc);
 		if (event.press) {
 			const base = baseOf(sid);
