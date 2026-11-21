@@ -17,7 +17,7 @@ const DEFAULT_SKILLS = {
 	shadowBurst2: { name: 'Shadow Burst (hit 2)', duration: 2025 },
 	soulReversal: { name: 'Soul Reversal', duration: 600 },
 	retaliate: { name: 'Retaliate' },
-	retribution: { name: 'Retribution', duration: 526 },
+	retribution: { name: 'Retribution', duration: 1571 },
 	shadowReaping: { name: 'Shadow Reaping', duration: 780 },
 	shroudedEscape: { name: 'Shrouded Escape', duration: 829, distance: 145 },
 	cableStep: { name: 'Cable Step', duration: 1266 },
@@ -465,7 +465,9 @@ module.exports = {
 		{ key: 'shadowStep', prop: 'duration', old: [700], value: 685 },
 		{ key: 'shadowStep', prop: 'distance', old: [175], value: 178 },
 		{ key: 'shadowLash', prop: 'durations', old: [[2150, 1250, 1250, 1250], [2135, 1240, 1240, 1240], [2135, 1240, 1240, 1235]], value: [2135, 1240, 1240, 1218] },
-		{ key: 'spiralBarrage', prop: 'durations', old: [[990, 990, 1200, 880, 1400, 1905]], value: [990, 980, 1200, 855, 1400, 1900] }
+		{ key: 'spiralBarrage', prop: 'durations', old: [[990, 990, 1200, 880, 1400, 1905]], value: [990, 980, 1200, 855, 1400, 1900] },
+		// sniff 2026-11-21: the server plays Retribution 1571 ms (fixed speed); 526 came from the old script and ended it far too early
+		{ key: 'retribution', prop: 'duration', old: [526], value: 1571 }
 	],
 	EXTRA_CONFIG: {
 		SLOW_GRIM: false,

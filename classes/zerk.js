@@ -325,6 +325,7 @@ function setup(api) {
 	}
 
 	const DASH_REACH = 494;
+	const DASH_CORRECT = 100;
 	const positions = new Map();
 	let owPredicted = null;
 	const keepPos = (id, loc, dest, speed) => {
@@ -349,6 +350,18 @@ function setup(api) {
 	api.tryHook('S_DESPAWN_NPC', 3, (e) => positions.delete(String(e.gameId)));
 	api.tryHook('S_DESPAWN_USER', 3, (e) => positions.delete(String(e.gameId)));
 	api.tryHook('S_LOAD_TOPO', 3, () => positions.clear());
+	// bosses move mostly through their skill animations (S_ACTION_STAGE animSeq along w) and rarely send S_NPC_LOCATION
+	api.tryHook('S_ACTION_STAGE', 9, (e) => {
+		if (e.gameId === api.cid() || !e.loc) return;
+		let dist = 0, ms = 0;
+		for (const s of (e.animSeq || [])) { dist += Number(s.distance) || 0; ms += Number(s.duration) || 0; }
+		ms /= Number(e.speed) || 1;
+		if (dist < 1 || ms <= 0) return keepPos(e.gameId, e.loc);
+		const w = Number(e.w) || 0;
+		keepPos(e.gameId, e.loc, { x: e.loc.x + Math.cos(w) * dist, y: e.loc.y + Math.sin(w) * dist, z: e.loc.z }, dist / (ms / 1000));
+	});
+	api.tryHook('S_ACTION_END', 5, (e) => { if (e.gameId !== api.cid()) keepPos(e.gameId, e.loc); });
+	api.tryHook('S_INSTANT_MOVE', 3, (e) => { if (e.gameId !== api.cid()) keepPos(e.gameId, e.loc); });
 
 	function predictOverwhelm(event, info) {
 		const sid = info.sid;
@@ -376,7 +389,7 @@ function setup(api) {
 			travel = full;
 		}
 		const duration = (travel / d.dashDistance) * d.dashDuration;
-		owPredicted = { target };
+		owPredicted = { target, dest };
 		api.startAction(event, sid, { duration, fixedSpeed: true, dest, endType: 38, requestId: sid });
 		api.dispatch.toClient('S_INSTANT_DASH', 3, { gameId: api.cid(), target, unk: 0, loc: dest, w: event.w });
 		api.recordPacket('MOD', 'Overwhelm predicted', { target: target ? 'yes (' + Math.round(reach) + ' units)' : (tpos ? 'out of reach (' + Math.round(reach) + ')' : 'position unknown') });
@@ -431,14 +444,19 @@ function setup(api) {
 	});
 
 	api.hook('S_INSTANT_DASH', 3, (event) => {
-		if (!api.predicting() || event.gameId !== api.cid()) return;
+		if (event.gameId !== api.cid()) { if (api.enabled()) keepPos(event.gameId, event.loc); return; }
+		if (!api.predicting()) return;
 		let target = 0n;
 		try { target = event.target ? BigInt(event.target) : 0n; } catch (e) {}
 		const ours = owPredicted ? BigInt(owPredicted.target || 0n) : 0n;
+		const ourDest = owPredicted && owPredicted.dest;
 		owPredicted = null;
 		const a = running();
-		if (a && at(a.skillId, 31, 0)) a.dest = { x: event.loc.x, y: event.loc.y, z: event.loc.z };
-		if (target === ours) return false;
+		const dashing = a && at(a.skillId, 31, 0);
+		if (dashing) a.dest = { x: event.loc.x, y: event.loc.y, z: event.loc.z };
+		const off = ourDest ? Math.hypot(event.loc.x - ourDest.x, event.loc.y - ourDest.y) : 0;
+		if (target === ours && (off <= DASH_CORRECT || !dashing)) return false;
+		if (target === ours) { api.recordPacket('S->C', 'S_INSTANT_DASH [PASSED: server dash ends ' + Math.round(off) + ' units from ours]', {}); return; }
 		api.recordPacket('S->C', 'S_INSTANT_DASH [PASSED: server dash differs from ours]', { server: String(target), ours: String(ours) });
 	});
 
