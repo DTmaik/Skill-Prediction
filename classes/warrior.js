@@ -238,7 +238,7 @@ function setup(api) {
 
 	// a chain request the server ignored without any answer (it came before the chain point - bug report: Traverse Cut after
 	// Poison Blade, Scythe after Blade Draw): repeated every few ms while the server still plays the skill it chains from
-	const CHAIN_REPEAT_GAP = 50, CHAIN_REPEAT_MAX = 8;
+	const CHAIN_REPEAT_GAP = 50, CHAIN_REPEAT_MAX = 8, END_REPEAT_WAIT = 30;
 	let chainRepeat = null;
 	function armChainRepeat(sid, event, delay) {
 		if (chainRepeat) api.clearTimeout(chainRepeat.timer);
@@ -264,6 +264,33 @@ function setup(api) {
 	}
 	api.hook('S_CANNOT_START_SKILL', 4, { order: -1000 }, (event) => {
 		if (chainRepeat && groupOf(getSkillId(event.skill)) === chainRepeat.g) { api.clearTimeout(chainRepeat.timer); chainRepeat = null; }
+		if (endRepeat && groupOf(getSkillId(event.skill)) === endRepeat.g) endRepeat = null;
+	});
+
+	// a request timed to reach the server right after its previous skill ends (our animation already over) can still come a few ms
+	// early when the server plays that skill longer than we do; the server then ignores it without any answer (log ttb-1795297735260:
+	// Combative Strike 2 ms before the end of Death From Above -> ghost, the Traverse Cut after it not chained). Sent once more when the
+	// server end of that skill comes and the server has not started the request.
+	let endRepeat = null;
+	function armEndRepeat(sid, event, delay) {
+		endRepeat = null;
+		const prev = api.action();
+		if (!event || event.press !== undefined || !prev || !prev.finished || prev.isHold || serverBusyLeft() === -Infinity) return;
+		endRepeat = { sid, g: groupOf(sid), srcGroup: groupOf(prev.skillId), sentAt: Date.now() + Math.max(0, delay), event: api.copyEvent(event) };
+	}
+	api.hook('S_ACTION_END', 5, { order: -1000 }, (event) => {
+		const r = endRepeat;
+		if (!r || event.gameId !== api.cid() || groupOf(getSkillId(event.skill)) !== r.srcGroup) return;
+		endRepeat = null;
+		const now = Date.now();
+		if (now < r.sentAt || now - r.sentAt > rttTyp() + 80) return;
+		api.setTimeout(() => {
+			if (!api.predicting() || api.serverAckAt(r.g) >= r.sentAt || endRepeat) return;
+			const a = api.action();
+			if (!a || groupOf(a.requestId || a.skillId) !== r.g) return;
+			api.recordPacket('MOD->S', 'C_START_SKILL [sent again: it reached the server before the end of the previous skill]', { skill: api.skillLabel(r.sid) });
+			api.sendRetry('C_START_SKILL', 7, r.event);
+		}, END_REPEAT_WAIT);
 	});
 
 	function holdAfterPredict(info, event, delay) {
@@ -524,6 +551,7 @@ function setup(api) {
 			const chain = chainFromPrev(sid);
 			const delay = requestHold(sid, chain);
 			if (chain) armChainRepeat(sid, event, delay);
+			else armEndRepeat(sid, event, delay);
 			pendingHold = delay > 0 ? { until: Date.now() + delay, at: Date.now() } : null;
 			return delay;
 		},
