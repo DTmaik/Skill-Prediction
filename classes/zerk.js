@@ -326,6 +326,8 @@ function setup(api) {
 
 	const DASH_REACH = 494;
 	const DASH_CORRECT = 100;
+	const NPC_UNKNOWN_GRACE = 200;
+	const SERVER_DASH_MS_PER_UNIT = 1.65; // logs: 341 units in 575 ms, 346 units in 550 ms
 	const positions = new Map();
 	let owPredicted = null;
 	const keepPos = (id, loc, dest, speed) => {
@@ -347,20 +349,51 @@ function setup(api) {
 	api.tryHook('S_NPC_LOCATION', 3, (e) => keepPos(e.gameId, e.loc, e.dest, e.speed));
 	api.tryHook('S_SPAWN_USER', 14, (e) => keepPos(e.gameId, e.loc));
 	api.tryHook('S_USER_LOCATION', 5, (e) => keepPos(e.gameId, e.loc, e.dest, e.speed));
-	api.tryHook('S_DESPAWN_NPC', 3, (e) => positions.delete(String(e.gameId)));
+	api.tryHook('S_DESPAWN_NPC', 3, (e) => { positions.delete(String(e.gameId)); npcActs.delete(String(e.gameId)); });
 	api.tryHook('S_DESPAWN_USER', 3, (e) => positions.delete(String(e.gameId)));
-	api.tryHook('S_LOAD_TOPO', 3, () => positions.clear());
-	// bosses move mostly through their skill animations (S_ACTION_STAGE animSeq along w) and rarely send S_NPC_LOCATION
+	api.tryHook('S_LOAD_TOPO', 3, () => { positions.clear(); npcActs.clear(); });
+	// bosses move mostly through their skills and rarely send S_NPC_LOCATION: the movement is in the S_ACTION_STAGE animSeq (distance
+	// along w) or, when that is empty, only in the game data -> learned per skill stage from its S_ACTION_STAGE to the next stage / the
+	// S_ACTION_END (logs ttb-1795291238947: boss skill 1108 walks 458 units in 3.4 s; ttb-1795291454813: skill 1104 walks 338 units in
+	// its stage 1, along the new w of that stage - both with an empty animSeq). Not learned yet: position uncertain.
+	const npcActs = new Map(), npcMoves = new Map();
+	const npcSkillKey = (e) => { const sk = e.skill || {}; return String(e.templateId) + ':' + String(sk.huntingZoneId || 0) + ':' + String(sk.id !== undefined ? sk.id : sk); };
+	function positionUncertain(id) {
+		const act = npcActs.get(String(id));
+		return Boolean(act && !act.known && Date.now() - act.at > NPC_UNKNOWN_GRACE);
+	}
+	function learnNpcSegment(act, loc) {
+		if (!act.learn || npcMoves.has(act.seg)) return;
+		const dx = loc.x - act.loc.x, dy = loc.y - act.loc.y, c = Math.cos(act.w), sn = Math.sin(act.w);
+		npcMoves.set(act.seg, { fwd: dx * c + dy * sn, side: -dx * sn + dy * c, ms: Date.now() - act.at });
+		if (npcMoves.size > 2000) npcMoves.delete(npcMoves.keys().next().value);
+	}
 	api.tryHook('S_ACTION_STAGE', 9, (e) => {
 		if (e.gameId === api.cid() || !e.loc) return;
+		const key = npcSkillKey(e), prev = npcActs.get(String(e.gameId));
+		if (prev && prev.id === e.id) learnNpcSegment(prev, e.loc); // next stage of the same skill closes the previous one
 		let dist = 0, ms = 0;
-		for (const s of (e.animSeq || [])) { dist += Number(s.distance) || 0; ms += Number(s.duration) || 0; }
+		for (const st of (e.animSeq || [])) { dist += Number(st.distance) || 0; ms += Number(st.duration) || 0; }
 		ms /= Number(e.speed) || 1;
-		if (dist < 1 || ms <= 0) return keepPos(e.gameId, e.loc);
-		const w = Number(e.w) || 0;
-		keepPos(e.gameId, e.loc, { x: e.loc.x + Math.cos(w) * dist, y: e.loc.y + Math.sin(w) * dist, z: e.loc.z }, dist / (ms / 1000));
+		const w = Number(e.w) || 0, c = Math.cos(w), sn = Math.sin(w);
+		const act = { id: e.id, seg: key + ':' + String(e.stage || 0), loc: { x: e.loc.x, y: e.loc.y }, w, at: Date.now(), known: true, learn: false };
+		if (dist >= 1 && ms > 0) keepPos(e.gameId, e.loc, { x: e.loc.x + c * dist, y: e.loc.y + sn * dist, z: e.loc.z }, dist / (ms / 1000));
+		else {
+			act.learn = true;
+			const m = npcMoves.get(act.seg);
+			if (!m) { act.known = false; keepPos(e.gameId, e.loc); }
+			else if (Math.hypot(m.fwd, m.side) < 5 || m.ms <= 0) keepPos(e.gameId, e.loc);
+			else keepPos(e.gameId, e.loc, { x: e.loc.x + c * m.fwd - sn * m.side, y: e.loc.y + sn * m.fwd + c * m.side, z: e.loc.z }, Math.hypot(m.fwd, m.side) / (m.ms / 1000));
+		}
+		npcActs.set(String(e.gameId), act);
+		if (npcActs.size > 500) npcActs.delete(npcActs.keys().next().value);
 	});
-	api.tryHook('S_ACTION_END', 5, (e) => { if (e.gameId !== api.cid()) keepPos(e.gameId, e.loc); });
+	api.tryHook('S_ACTION_END', 5, (e) => {
+		if (e.gameId === api.cid() || !e.loc) return;
+		const act = npcActs.get(String(e.gameId));
+		if (act && act.id === e.id) { npcActs.delete(String(e.gameId)); learnNpcSegment(act, e.loc); }
+		keepPos(e.gameId, e.loc);
+	});
 	api.tryHook('S_INSTANT_MOVE', 3, (e) => { if (e.gameId !== api.cid()) keepPos(e.gameId, e.loc); });
 
 	function predictOverwhelm(event, info) {
@@ -388,11 +421,19 @@ function setup(api) {
 			};
 			travel = full;
 		}
-		const duration = (travel / d.dashDistance) * d.dashDuration;
-		owPredicted = { target, dest };
-		api.startAction(event, sid, { duration, fixedSpeed: true, dest, endType: 38, requestId: sid });
-		api.dispatch.toClient('S_INSTANT_DASH', 3, { gameId: api.cid(), target, unk: 0, loc: dest, w: event.w });
-		api.recordPacket('MOD', 'Overwhelm predicted', { target: target ? 'yes (' + Math.round(reach) + ' units)' : (tpos ? 'out of reach (' + Math.round(reach) + ')' : 'position unknown') });
+		if (target && positionUncertain(target)) {
+			// the boss walks with a skill we have not seen yet: start the animation, the dash comes with the server (passed through)
+			const here = { x: event.loc.x, y: event.loc.y, z: event.loc.z };
+			owPredicted = { target, dest: null, wait: true };
+			api.startAction(event, sid, { duration: Math.max((travel / d.dashDistance) * d.dashDuration, api.estimateRtt() * 2 + 300), fixedSpeed: true, dest: here, endType: 38, requestId: sid });
+			api.recordPacket('MOD', 'Overwhelm predicted without dash: target moves with an unknown skill, waiting for the server dash', { reach: Math.round(reach) });
+		} else {
+			const duration = (travel / d.dashDistance) * d.dashDuration;
+			owPredicted = { target, dest };
+			api.startAction(event, sid, { duration, fixedSpeed: true, dest, endType: 38, requestId: sid });
+			api.dispatch.toClient('S_INSTANT_DASH', 3, { gameId: api.cid(), target, unk: 0, loc: dest, w: event.w });
+			api.recordPacket('MOD', 'Overwhelm predicted', { target: target ? 'yes (' + Math.round(reach) + ' units)' : (tpos ? 'out of reach (' + Math.round(reach) + ')' : 'position unknown') });
+		}
 		api.lock(sid, api.GLOBAL_LOCK_DELAY);
 		api.scheduleRetries('C_START_TARGETED_SKILL', 6, event, [25, 50, 75, 100]);
 		api.setLastSkill(sid, event);
@@ -450,13 +491,18 @@ function setup(api) {
 		try { target = event.target ? BigInt(event.target) : 0n; } catch (e) {}
 		const ours = owPredicted ? BigInt(owPredicted.target || 0n) : 0n;
 		const ourDest = owPredicted && owPredicted.dest;
+		const waited = Boolean(owPredicted && owPredicted.wait);
 		owPredicted = null;
 		const a = running();
 		const dashing = a && at(a.skillId, 31, 0);
 		if (dashing) a.dest = { x: event.loc.x, y: event.loc.y, z: event.loc.z };
 		const off = ourDest ? Math.hypot(event.loc.x - ourDest.x, event.loc.y - ourDest.y) : 0;
-		if (target === ours && (off <= DASH_CORRECT || !dashing)) return false;
-		if (target === ours) { api.recordPacket('S->C', 'S_INSTANT_DASH [PASSED: server dash ends ' + Math.round(off) + ' units from ours]', {}); return; }
+		if (target === ours && !waited && (off <= DASH_CORRECT || !dashing)) return false;
+		if (dashing) {
+			const travel = Math.hypot(event.loc.x - a.start.x, event.loc.y - a.start.y);
+			api.scheduleActionEnd(a, Math.max(Date.now() - a.startedAt + 50, travel * SERVER_DASH_MS_PER_UNIT));
+		}
+		if (target === ours) { api.recordPacket('S->C', 'S_INSTANT_DASH [PASSED: ' + (waited ? 'waited for the server dash' : 'server dash ends ' + Math.round(off) + ' units from ours') + ']', {}); return; }
 		api.recordPacket('S->C', 'S_INSTANT_DASH [PASSED: server dash differs from ours]', { server: String(target), ours: String(ours) });
 	});
 
