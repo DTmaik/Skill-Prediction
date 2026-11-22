@@ -93,6 +93,9 @@ module.exports = {
 	FAMILIES,
 	GLYPHS,
 	PARTY_LOCK_GROUPS,
+	// blind copies of a start request (the server ignores one that arrives a few ms before its previous skill ends): 3 instead of the
+	// core default of 6 - with 6 every press reached the server 3-6 times, which server anti-cheat tools read as packet spam
+	RETRY_DELAYS: [35, 75, 115],
 	SPEED_ABNORMALS: {},
 	EXTRA_CONFIG: {
 		NO_MOTE_CANCEL: true,
