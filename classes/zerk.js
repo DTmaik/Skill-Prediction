@@ -294,7 +294,10 @@ function setup(api) {
 			distance: 0,
 			stages,
 
-			stageLoc: (st, start, w) => ({ x: start.x + Math.cos(w) * d.distance * st, y: start.y + Math.sin(w) * d.distance * st, z: start.z }),
+			// no stageLoc: the spins do not move the character, the client reports the same spot for each spin and the server takes
+			// that (C_NOTIFY_LOCATION_IN_ACTION). Marching 35 units per spin along the start direction was ignored by the client while
+			// under about 165 units off; with a small sideways drift it reached 210 at the last spin and the client snapped to it,
+			// into the boss (log ttb-1795309197604).
 			onStage: (st) => {
 				if (st === 1 && subOf(sid) === 13) openVampWindow(sid, 0, (d.spinDuration * 4 + d.endDuration) / api.aspd());
 			}
@@ -500,7 +503,13 @@ function setup(api) {
 		if (target === ours && !waited && (off <= DASH_CORRECT || !dashing)) return false;
 		if (dashing) {
 			const travel = Math.hypot(event.loc.x - a.start.x, event.loc.y - a.start.y);
-			api.scheduleActionEnd(a, Math.max(Date.now() - a.startedAt + 50, travel * SERVER_DASH_MS_PER_UNIT));
+			const elapsed = Date.now() - a.startedAt;
+			// a server dash with a target: the client dashes again from here at its own speed and sends the hit (311001) itself when it
+			// is close, which ends this dash. Ending it at the server time cut the client dash short in front of the target, no hit
+			// (log ttb-1795318248237: we had no target at 496 units, the server took the dummy, our end came 70 ms before the hit point).
+			const d = api.skills.overwhelm;
+			const ms = target ? elapsed + (travel / d.dashDistance) * d.dashDuration : travel * SERVER_DASH_MS_PER_UNIT;
+			api.scheduleActionEnd(a, Math.max(elapsed + 50, ms));
 		}
 		if (target === ours) { api.recordPacket('S->C', 'S_INSTANT_DASH [PASSED: ' + (waited ? 'waited for the server dash' : 'server dash ends ' + Math.round(off) + ' units from ours') + ']', {}); return; }
 		api.recordPacket('S->C', 'S_INSTANT_DASH [PASSED: server dash differs from ours]', { server: String(target), ours: String(ours) });
