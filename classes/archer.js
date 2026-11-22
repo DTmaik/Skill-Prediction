@@ -240,6 +240,48 @@ function setup(api) {
 		api.recordPacket('MOD', 'Rapid Fire hit held (server not ready for it yet)', { skill: api.skillLabel(info.sid), ms: Math.round(when - Date.now()) });
 	}
 
+	// 115 client logs (archerrota / radiantsalvo): the server takes a Final Salvo hit only some time after the previous one
+	// (attack speed 1.0, at its arrival): hit 1 -> 2 from ~234 (accepted 234-255), later hits from ~165 (refused 156 / 163, accepted
+	// 167), the first hit after a Radiant / Penetrating Arrow release from ~186 (refused 185 / 187, accepted 184 / 188). SP showed every
+	// pressed hit at once: when spammed it ran up to 80 ms ahead and the next skills were refused first. Now held like Rapid Fire.
+	const P115 = Boolean(api.dispatch && api.dispatch.isP115);
+	const SALVO_FIRST_GAP = 228, SALVO_HIT_GAP = 162, RELEASE_SALVO_GAP = 186; // + RF_GAP_MARGIN (8 ms)
+	let salvoPred = null, salvoHeld = null, salvoTimer = null;
+	function salvoEarliest(sid) {
+		if (!P115) return 0;
+		const sub = subOf(sid);
+		let prevSid, prevAt, gapNorm, speed = api.aspd() > 0 ? api.aspd() : 1;
+		if (sub >= 1) {
+			if (!salvoPred || !at(salvoPred.sid, 22, sub - 1)) return 0;
+			prevSid = salvoPred.sid; prevAt = salvoPred.at;
+			gapNorm = sub === 1 ? SALVO_FIRST_GAP : SALVO_HIT_GAP;
+		} else {
+			const a = running();
+			if (!a || !(at(a.skillId, 3) || at(a.skillId, 4)) || subOf(a.skillId) < 10) return 0;
+			prevSid = a.skillId; prevAt = a.startedAt; gapNorm = RELEASE_SALVO_GAP;
+			if (a.speed > 0) speed = a.speed;
+		}
+		const gap = gapNorm / speed + RF_GAP_MARGIN;
+		const ack = api.serverSkillAckAt(prevSid);
+		if (ack >= prevAt) return ack - api.estimateRtt() + gap;
+		return prevAt + gap; // server stage not here yet: from our own start
+	}
+	function clearSalvoHold() { api.clearTimeout(salvoTimer); salvoHeld = null; }
+	function holdSalvo(info, event, when) {
+		clearSalvoHold();
+		const held = salvoHeld = { name: info.name, version: info.version, event: api.copyEvent(event), sid: info.sid };
+		const fire = () => {
+			if (salvoHeld !== held || !api.predicting()) return;
+			const t = salvoEarliest(held.sid);
+			if (Date.now() < t) { salvoTimer = api.setTimeout(fire, Math.max(1, t - Date.now())); return; }
+			salvoHeld = null;
+			api.recordPacket('MOD->S', 'Final Salvo hit sent (held for the server)', { skill: api.skillLabel(held.sid) });
+			api.startSkill(held.name, held.version, held.event);
+		};
+		salvoTimer = api.setTimeout(fire, Math.max(1, when - Date.now()));
+		api.recordPacket('MOD', 'Final Salvo hit held (server not ready for it yet)', { skill: api.skillLabel(info.sid), ms: Math.round(when - Date.now()) });
+	}
+
 	let chasePredicted = null;
 	const chaseMs = (dist) => {
 		const d = api.skills.chase;
@@ -341,10 +383,13 @@ function setup(api) {
 			const sid = info.sid;
 			const g = groupOf(sid);
 			if (rfHeld && g !== 8) clearRfHold();
+			if (salvoHeld && g !== 22) clearSalvoHold();
 
 			if (g === 22) {
 				const sub = subOf(sid);
 				if (sub === 0 ? !salvoReady() : !salvoNext(sub)) return 'pass';
+				const when = salvoEarliest(sid);
+				if (Date.now() < when) { holdSalvo(info, event, when); return 'drop'; }
 			}
 			if (at(sid, 8, 6)) return 'drop';
 			if (g === 8 && subOf(sid) >= 1) {
@@ -369,7 +414,7 @@ function setup(api) {
 			if ((g === 3 || g === 4) && subOf(sid) >= 10) openSalvoWindow();
 			if (g === 29) openSalvoWindow();
 			if (at(sid, 22, 4)) salvoWindowUntil = 0;
-			if (g === 22) lastSalvo = { sub: subOf(sid), at: Date.now() };
+			if (g === 22) { lastSalvo = { sub: subOf(sid), at: Date.now() }; salvoPred = { sid, at: a ? a.startedAt : Date.now() }; }
 		},
 
 		serverStage(event, sid) {
@@ -396,6 +441,8 @@ function setup(api) {
 			guessed.clear();
 			clearRfHold();
 			rfLast = null;
+			clearSalvoHold();
+			salvoPred = null;
 		},
 		bugState() {
 			return `salvo=${salvoReady() ? 'ready' : '-'} focus=${api.hasAbnormal(ABN_FOCUS) ? 1 : 0} blazing=R${blazingBonus(3)}/P${blazingBonus(4)}/Poison${blazingBonus(19)} stunTrap=${stunTrapBuff ? 1 : 0} fastKick=${fastKickRace() ? 1 : 0}`;

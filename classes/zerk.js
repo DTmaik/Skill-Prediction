@@ -161,6 +161,13 @@ function setup(api) {
 	let lastStatPacket = null;
 	let blockHeld = false;
 	let vbHeld = false;
+	const P115 = Boolean(api.dispatch && api.dispatch.isP115); // OSTO 115 hybrid client (see p115.js)
+	let p115ChainAt = 0;
+	const FLATTEN_BLOCK_FROM = 1770;
+	const ROLL_BLOCK_EXTRA = 10;
+	const ABN_TS_RAZE_GLYPH = 24170;
+	let pendingBlock = null;
+	let sendingHeldBlock = false;
 	let vampPress = null;
 	const knownSkills = new Set();
 
@@ -516,6 +523,57 @@ function setup(api) {
 	});
 
 	let pendingSmash = null, smashTimer = null;
+	// 115 client logs: the server refuses a block in the Flatten chain (4:30) before ~1770 ms (attack speed 1.0) after its own start
+	// (refused at 1504 / 1672 / 1731-1739, accepted from 1733-1769). SP used to show the block anyway, ended Flatten and predicted
+	// the next skill while the server was still in Flatten = ghost (Tackle / Overwhelm). An early block is now held until the server
+	// takes it; a skill pressed meanwhile is sent right after the block (same order as the player pressed them).
+	function flattenBlockWait() {
+		const a = running();
+		if (!a || !at(a.skillId, 4, 30)) return 0;
+		const sv = api.serverActive();
+		const svAt = sv && at(sv.id, 4, 30) ? sv.at : a.startedAt + api.estimateRtt();
+		const speed = a.speed || api.aspd();
+		const arrive = (Date.now() - svAt + api.estimateRtt()) * speed;
+		return Math.max(0, (FLATTEN_BLOCK_FROM - arrive) / speed);
+	}
+	// 115 client log (rotation.log 10.5 s): a block during the Evasive Smash roll (24:0) is refused by the server until the roll is over
+	// (refused at ~776 / 835 of 995). SP showed the block ~170 ms early and only the tap resend got it through. The block is now held
+	// until the server roll ends (timed to arrive then, or at the latest when the server roll end comes in).
+	function rollBlockWait() {
+		const a = running();
+		const sv = api.serverActive();
+		let svAt;
+		if (sv && at(sv.id, 24, 0)) svAt = sv.at;
+		else if (a && at(a.skillId, 24, 0)) svAt = a.startedAt + api.estimateRtt();
+		else return 0;
+		const speed = (a && at(a.skillId, 24, 0) && a.speed) || api.aspd();
+		const arrive = (Date.now() - svAt + api.estimateRtt()) * speed;
+		const roll = Number(api.skills.evasiveSmashRoll && api.skills.evasiveSmashRoll.duration) || 995;
+		return Math.max(0, (roll + ROLL_BLOCK_EXTRA - arrive) / speed);
+	}
+	function holdFlattenBlock(event, wait, roll) {
+		pendingBlock = { press: api.copyEvent(event), release: null, next: [], roll: Boolean(roll), timer: api.setTimeout(sendPendingBlock, wait) };
+		api.recordPacket('MOD', roll ? 'Block held back (server still in the Evasive Smash roll)' : 'Block held back (Flatten chain cannot be cancelled yet)', { wait: Math.round(wait) });
+	}
+	function sendPendingBlock() {
+		const p = pendingBlock;
+		if (!p) return;
+		pendingBlock = null;
+		api.clearTimeout(p.timer);
+		api.recordPacket('MOD->S', p.roll ? 'Held block sent (server roll is over)' : 'Held block sent (Flatten chain can be cancelled now)', { tap: Boolean(p.release), next: p.next.length });
+		sendingHeldBlock = true;
+		try {
+			api.startPress(p.press);
+			if (p.release) api.startPress(p.release);
+		} finally {
+			sendingHeldBlock = false;
+		}
+		for (const n of p.next) {
+			if (n.press) api.startPress(n.event);
+			else api.startSkill(n.name, n.version, n.event);
+		}
+	}
+
 	function sendPendingSmash() {
 		api.clearTimeout(smashTimer);
 		if (!pendingSmash) return;
@@ -543,6 +601,11 @@ function setup(api) {
 		start(event, info) {
 			const sid = info.sid;
 			const g = groupOf(sid);
+			if (pendingBlock && !sendingHeldBlock) {
+				pendingBlock.next.push({ name: info.name, version: info.version, event: api.copyEvent(event) });
+				api.recordPacket('MOD', 'Skill queued behind the held block', { skill: api.skillLabel(sid) });
+				return 'drop';
+			}
 			if (g !== 10 && fakeCycloneSlow) removeCycloneSlow();
 			if (g === 28) { setDstance(subOf(sid) !== 50, 'Intimidation'); return 'pass'; }
 
@@ -577,6 +640,14 @@ function setup(api) {
 			void a;
 		},
 
+		// 115 client logs: the Thunder Strike release runs 25 % faster while abnormality 24170 (Raze glyph buff, consumed by the
+		// release) is active - server speed 1.986 / 1.486 at attack speed 1.589 / 1.189, and 1.0x without it. Without this SP learned
+		// the 1.25 after two releases and then also used it without the buff (release ended too early, block refused).
+		skillSpeed(sid) {
+			if (P115 && at(sid, 3, 10, 11, 12, 13) && api.hasAbnormal(ABN_TS_RAZE_GLYPH)) return 1.25;
+			return 1;
+		},
+
 		requestDelay(sid) {
 			if (groupOf(sid) !== 25) return 0;
 			const a = api.action();
@@ -603,10 +674,22 @@ function setup(api) {
 				}
 				return undefined;
 			}
+			if (pendingBlock && !sendingHeldBlock) {
+				if (g === 2 && !event.press && !pendingBlock.release) { pendingBlock.release = api.copyEvent(event); blockHeld = false; return 'drop'; }
+				if (g === 2) return 'drop'; // repeated block press while the first one waits
+				pendingBlock.next.push({ press: true, event: api.copyEvent(event) });
+				return 'drop';
+			}
 			if (g === 2) {
 				const sub = subOf(sid);
 				if (sub === 1 || sub === 31) setDstance(true, 'tank block');
 				else if (sub === 0 || sub === 30) setDstance(false, 'offensive block');
+				if (P115 && event.press && !sendingHeldBlock) {
+					const wait = flattenBlockWait();
+					if (wait > 0) { blockHeld = true; holdFlattenBlock(event, wait); return 'drop'; }
+					const rollWait = rollBlockWait();
+					if (rollWait > 0) { blockHeld = true; holdFlattenBlock(event, rollWait, true); return 'drop'; }
+				}
 				if (!event.press) {
 					blockHeld = false;
 					if (runningIs(7)) return 'pass';
@@ -623,6 +706,21 @@ function setup(api) {
 					return 'done';
 				}
 				return undefined;
+			}
+			// 115 client: in the chain window after a Thunder Strike / Cyclone / Lethal Strike release the client asks for the
+			// Vampiric Blow chain with press=false first (press=true follows ~80 ms later) and the server starts the chain on it.
+			// The press=false goes to the server unchanged, the chain is predicted right away; the late press=true is passed on.
+			if (P115 && at(sid, 15, 0)) {
+				if (!event.press && !vbHeld && vampWindow && !vampChainRunning() && vampReady() && lastRunningIs(['3:13', '10:13', '18:13'])) {
+					startVampChain(event);
+					p115ChainAt = Date.now();
+					api.recordPacket('MOD', 'Vampiric Blow chain predicted on press=false (115 client)', {});
+					return 'done';
+				}
+				if (event.press && vampChainRunning() && Date.now() - p115ChainAt < 400) {
+					vbHeld = true;
+					return 'pass';
+				}
 			}
 			if (at(sid, 15, 0)) vbHeld = Boolean(event.press);
 			if (!event.press) {
@@ -663,6 +761,7 @@ function setup(api) {
 		},
 
 		targeted(event, info) {
+			if (pendingBlock) sendPendingBlock(); // targeted skills are not queued: the block goes out first
 			if (at(info.sid, 31, 0) && !api.isLocked(info.sid)) return predictOverwhelm(event, info);
 			return undefined;
 		},
@@ -680,6 +779,7 @@ function setup(api) {
 			return undefined;
 		},
 		serverEnd(event, sid) {
+			if (at(sid, 24, 0) && pendingBlock && pendingBlock.roll) sendPendingBlock(); // pressed first: goes out before the held smash hit
 			if (at(sid, 24, 0) && pendingSmash) sendPendingSmash();
 			if (at(sid, 3, 10, 11, 12, 13)) clearTsGlyphBuffs();
 			if (at(sid, 10, 0)) removeCycloneSlow();
@@ -706,6 +806,7 @@ function setup(api) {
 		reset() {
 			closeVampWindow();
 			removeCycloneSlow();
+			if (pendingBlock) { api.clearTimeout(pendingBlock.timer); pendingBlock = null; }
 			blockHeld = false;
 			vbHeld = false;
 			vampPress = null;

@@ -219,6 +219,38 @@ function setup(api) {
 		queueStart(info, event, wait, 9, 'Blast during the Mana Missiles shot shown + sent later (server allows it later than the client)');
 		return true;
 	}
+	// 115 client log (gunner.log): Blast right after the Scattershot chain (36130) reached the server at ~1115 (attack speed 1.0) - the
+	// point the client allows it - and the server took it there only half of the time (refused at 1096 / 1114 / 1114 / 1115, accepted at
+	// 1115 / 1116): refused, retried ~155 ms later, our Blast shown 150 ms early. Now shown + sent so it arrives from 1130 on.
+	const P115 = Boolean(api.dispatch && api.dispatch.isP115);
+	const SCATTER_CHAIN_BLAST_FROM = 1130;
+	function delayBlastAfterScatterChain(info, event) {
+		if (!P115 || groupOf(info.sid) !== 1 || info.name !== 'C_START_SKILL') return false;
+		const a = api.action();
+		if (!a || a.finished || !at(a.skillId, 3, 30)) return false;
+		const rtt = api.estimateRtt();
+		const ack = api.serverSkillAckAt(a.skillId);
+		const svAt = ack >= a.startedAt ? ack : a.startedAt + rtt;
+		const wait = Math.round(svAt - rtt + SCATTER_CHAIN_BLAST_FROM / (a.speed || 1) - Date.now());
+		if (wait <= 0) return false;
+		queueStart(info, event, wait, 3, 'Blast after the Scattershot chain shown + sent later (server takes it later than the client)');
+		return true;
+	}
+	// same log: a skill right after the Replenishment chain (150930, fixed speed) was refused at 687 / 697 ms and taken at 700 / 717
+	// (twice shown ~150 ms early). Shown + sent so it arrives from 710 ms on.
+	const REPLENISH_CHAIN_NEXT_FROM = 710;
+	function delayAfterReplenishChain(info, event) {
+		if (!P115 || groupOf(info.sid) === 15 || groupOf(info.sid) === 40 || !/^C_START_(SKILL|COMBO_INSTANT_SKILL)$/.test(info.name)) return false;
+		const a = api.action();
+		if (!a || a.finished || !at(a.skillId, 15, 30)) return false;
+		const rtt = api.estimateRtt();
+		const ack = api.serverSkillAckAt(a.skillId);
+		const svAt = ack >= a.startedAt ? ack : a.startedAt + rtt;
+		const wait = Math.round(svAt - rtt + REPLENISH_CHAIN_NEXT_FROM / (a.speed || 1) - Date.now());
+		if (wait <= 0) return false;
+		queueStart(info, event, wait, 15, 'Skill after the Replenishment chain shown + sent later (server takes it later than the client)');
+		return true;
+	}
 	function rollRequestDelay(sid) {
 		if (groupOf(sid) === 40 || !rollRanOutAt || rollRanOutAt < lastReloadAt) return 0;
 		return Math.max(0, reloadEndsAt + ROLL_END_MARGIN - Date.now());
@@ -516,6 +548,8 @@ function setup(api) {
 			if (!info.fam) return undefined;
 			if (delayAfterArrow(info, event)) return 'drop';
 			if (delayBlastInManaShot(info, event)) return 'drop';
+			if (delayBlastAfterScatterChain(info, event)) return 'drop';
+			if (delayAfterReplenishChain(info, event)) return 'drop';
 
 			if (a && runningG === g && [1, 3, 15].includes(g)) {
 				// the same skill again right before our animation ends is the next cast, not spam: the client times it from its own request,

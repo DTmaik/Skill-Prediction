@@ -2,19 +2,19 @@
     "files": {
         "C_CANCEL_LOCKON_TARGET.1.def": "6c93ae2adad459141faf8367b824c99d395d5b4a08a41fa8c52fabf419aa4fbc",
         "C_CREST_DISAPPLY_ALL.1.def": "75b5fa138240e5eb7d2eca8778e5e3d3d3450c46dfb8ef860e00f7456ab4f2b8",
-        "README.md": "3d53edc13f90ae403d6ebe066aed09c24b65a1070cace5cf77bc79d5abf16926",
-        "classes/archer.js": "7d58613e8f16c0072e847c5623bf3aeaa0b6e0c85fc2563aa7ea046a7fa062e1",
-        "classes/gunner.js": "66771680aeb941e2a64600a2e26fa9bcdc774654337a3c6d09c5b29e9342fe05",
-        "classes/lancer.js": "6dcefa34077ed4d44677e040dc3fe332eeb8bea2751be64ef7259999655cae18",
+        "README.md": "fafda1827ef05cd6f1226fec773e408864230f443e774fcb15767ea172cf8c89",
+        "classes/archer.js": "06bde02c8cecf3e523dd8014d1d447b564bbae89f5e7de4f1ce53a03ac813951",
+        "classes/gunner.js": "8db35320c47a1abdc349bfc4e9e2b6036962016081aafdc1cc9e8dc780f3bea4",
+        "classes/lancer.js": "e933b509aab1baa6261883a5c5087793662fb209ae68922edf3cff8608826ea7",
         "classes/mystic.js": "86b1dafafbed4925d745b60e76b58b42b68b37381c44b06c9843e76ba1b666ec",
         "classes/priest.js": "b2457b1128140fc1e6ca75b0bca0cb36b6753208c082413fe2ec69b509b1015f",
-        "classes/reaper.js": "278914f1d0e7e27b1852158d545ca2b6a17b9d8b8e9a8ab91ae9a70edf95f40a",
-        "classes/slayer.js": "ea8173bf48fa07f1c690ef0be67fdf1af2732681efabb39f06c1737529ba3fa2",
+        "classes/reaper.js": "ec77869b1746c7ab44938524e134b7d412cbc9af59e7253dd59f2fb59e67f7e3",
+        "classes/slayer.js": "7a5ef0ccce57dd172637f7f89c5d8658af1ff35ab5132efbf632ccbdd74defce",
         "classes/sorc.js": "c9a53d8b60bb7a65543887e71652c90eb56e570e2f72330b6f7ee4bdca3f04db",
         "classes/warrior.js": "8476753f776dea1e081d01413ac2055eeef3e07cece7896222c39634c1c12fc6",
-        "classes/zerk.js": "dca302e606c240ed04848d5fc90d3c3c59760a6ada1d4180d03981b125d1fd94",
-        "core.js": "a71a1500b6304577a0bbb92b14bdddcf9f23375e4d5515f68aebe23dc09ef441",
-        "index.js": "0a3619d05084165944491548c0cf5c0256d1ccb2d783a14a47db083677244192",
+        "classes/zerk.js": "fd9229933f3652e195147801d64752b1a8aebc71704a45320cd2f9df429cd81c",
+        "core.js": "4a479c69c68ff6e116e676b23934bb8a98c5e735d4f6d66c2e3edc3343ced55b",
+        "index.js": "90b514657df4c7081402ff66d1c9be5cb6626c632b44106e2371cf304933d335",
         "module.json": "adb36dfdb75c7803d841463e67151b4365a82ea60a432e460a6dd694e2a54df0",
         "node_modules/iohook/index.js": "86aaa0b6f4367cca407c89a58958bec8b04c226025941ca6dd02c211ac77dd55",
         "node_modules/iohook/package.json": "352cd3c01d27d3709300119b28ec970eb673d345850b32beb4b03ccf4721f8ec",
@@ -22,6 +22,7 @@
         "node_modules/iohook/res/85/uiohook.dll": "e0d8fc171e1b9f33360b895c34b897e2345ed7a4205e6e9c1a33961229d0cbb3",
         "node_modules/iohook/res/99/iohook.node": "f53c7594e7b67186ccb13c1e6ffa923cf6f97ffcdfa5ddfe30d7b450304f0a26",
         "node_modules/iohook/res/99/uiohook.dll": "ce3314fc70425d7af45cd0c650ea324163428843adff54d01df93aaa3dd85f58",
-        "omni.js": "50f831498c114d08055004556c176b81cda18c53894baa741376af1548c18777"
+        "omni.js": "50f831498c114d08055004556c176b81cda18c53894baa741376af1548c18777",
+        "p115.js": "e97963c26a269a6b20d16a1d2ce26b36238d7263db55b4e288ebc592a81d7f7e"
     }
 }

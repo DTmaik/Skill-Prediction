@@ -6,7 +6,7 @@ One mod for all supported classes, it picks the right one when you log in.
 Made mainly for the [OSTO](https://oldschool.to/) server. It should also work on other
 Patch 31 servers, but it was not tested there.
 
-**Not compatible with the 64-bit client.**
+**64-bit client:** works too, the mod detects it on its own (its settings are kept separately in `data-p115`). Not everything has been tested on it yet.
 
 Supported: Berserker, Gunner, Archer, Sorcerer, Reaper, Slayer, Lancer, Warrior,
 Priest, Mystic.

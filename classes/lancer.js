@@ -174,8 +174,13 @@ function setup(api) {
 
 	const blockFrom = {};
 
+	// 115 client log (lancer.log): the server refused the block in a chained Wallop (25:30) arriving at ~1185 and took it at 1193 / 1200
+	// (attack speed 1.0). One refusal ended Wallop only on our side and shifted the next skills (ghost block / Shield Barrage hit 2).
+	const P115 = Boolean(api.dispatch && api.dispatch.isP115);
+	const WALLOP_CHAIN_BLOCK_POINT = 1205;
 	const blockSeed = (id) => {
 		if (groupOf(id) === 18 && subOf(id) === 0) return 400;
+		if (P115 && groupOf(id) === 25 && subOf(id) === 30) return WALLOP_CHAIN_BLOCK_POINT;
 		return 0;
 	};
 	const blockPoint = (id) => blockFrom[id] || blockSeed(id);

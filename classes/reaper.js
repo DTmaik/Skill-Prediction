@@ -198,6 +198,37 @@ function setup(api) {
 		return 'done';
 	}
 
+	// 115 client log (reaperrota): the server takes the next skill only once Shadow Step (40) / Shrouded Escape (18) are over
+	// (Shrouded Escape refused during Shadow Step 2 at 617 of 704, Pendulum refused 3 ms before the Shrouded Escape end). SP is a ping
+	// ahead, so a skill pressed right after our animation reached the server too early: refused, the next skills shifted, ghost.
+	// Such a skill is now held (not shown yet) until it reaches the server after the end. A later press replaces the held one.
+	const P115 = Boolean(api.dispatch && api.dispatch.isP115);
+	const EVADE_END_MARGIN = 20; // Shadow Step 2 runs 704 on the server, our data 685
+	let evadeHeld = null, evadeTimer = null, evadeSending = false;
+	function evadeEndWait(sid) {
+		const a = running();
+		if (!a || !(at(a.skillId, 18) || at(a.skillId, 40)) || groupOf(sid) === groupOf(a.skillId)) return 0;
+		const rtt = api.estimateRtt();
+		const ack = api.serverSkillAckAt(a.skillId);
+		const svAt = ack >= a.startedAt ? ack : a.startedAt + rtt;
+		const dur = a.normDuration > 0 && a.speed > 0 ? a.normDuration / a.speed : (a.endAt || 0) - a.startedAt;
+		if (!(dur > 0)) return 0;
+		return svAt - rtt + dur + EVADE_END_MARGIN - Date.now();
+	}
+	function clearEvadeHold() { api.clearTimeout(evadeTimer); evadeHeld = null; }
+	function holdAfterEvade(info, event, wait) {
+		clearEvadeHold();
+		const held = evadeHeld = { name: info.name, version: info.version, event: api.copyEvent(event), sid: info.sid };
+		evadeTimer = api.setTimeout(() => {
+			if (evadeHeld !== held || !api.predicting()) return;
+			evadeHeld = null;
+			api.recordPacket('MOD->S', 'Held skill sent (server evade is over)', { skill: api.skillLabel(held.sid) });
+			evadeSending = true;
+			try { api.startSkill(held.name, held.version, held.event); } finally { evadeSending = false; }
+		}, Math.max(1, wait));
+		api.recordPacket('MOD', 'Skill held until the server ends the evade', { skill: api.skillLabel(info.sid), ms: Math.round(wait) });
+	}
+
 	const GRIM_CHAIN_FROM = [1, 11, 15, 9, 6, 5, 3, 8, 10];
 	const SUNDER_CHAIN_FROM = [5, 3];
 	// DTmaik
@@ -328,6 +359,11 @@ function setup(api) {
 			const sid = info.sid;
 			const g = groupOf(sid);
 			if (!info.fam) return undefined;
+			if (P115 && !evadeSending) {
+				const wait = evadeEndWait(sid);
+				if (wait > 0) { holdAfterEvade(info, event, wait); return 'drop'; }
+				if (evadeHeld) clearEvadeHold(); // pressed again after the end: this press goes, the held one not
+			}
 			clearFakes();
 			const rg = runningGroup();
 			const a = running();
@@ -422,6 +458,7 @@ function setup(api) {
 			lashDoneUntil = 0;
 			cablePending = false;
 			soulLockUntil = 0;
+			clearEvadeHold();
 		},
 		destroy() { clearFakes(); },
 		bugState() {

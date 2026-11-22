@@ -250,6 +250,8 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 	let showDebug = false;
 	let mounted = false;
 	let aspd = 1;
+	const P115 = Boolean(dispatch && dispatch.isP115); // OSTO 115 hybrid client (see p115.js)
+	const CHARGE_SYNC_MARGIN = 5;
 
 	let atkidBase = 0;
 	let currentClientActionId = null;
@@ -1348,11 +1350,23 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		c.serverLast = now;
 		// compare without the safety margin, else the learned factor ends up too fast and eats the margin
 		const expected = (chargeStageTime(c.stages[stageIdx] || 0, c) - (c.margin || 0)) / chargeCorrection;
-		if (expected > 50 && measured > 50) {
+		// 115 client (Sorcerer log 2026-11-21): the first server stage is often shorter (422-431 instead of 445-451 at attack speed
+		// 2.22), so stage 1 flipped the factor to 0.95, stage 2 back to 1.01, and the next charge ran 1 % slow. Only full stages count.
+		if (expected > 50 && measured > 50 && !(P115 && event.stage < 2)) {
 			const corr = Math.round((measured / expected) * 100) / 100;
 			if (corr > 0.5 && corr < 1.6 && Math.abs(corr - chargeCorrection) > 0.05) {
 				chargeCorrection = corr;
 				recordPacket('MOD', 'Charge speed corrected', { factor: corr });
+			}
+		}
+
+		// 115 client: the next charge level is timed from the server stage that just came in (server reached it ~1 ping ago), not from
+		// our own previous level. Sorcerer log: our levels were 20-45 ms behind the server (short first server stage, timer delay).
+		if (P115 && c.level === event.stage && c.level < c.stages.length && !c.released) {
+			const at = now - estimateRtt() + chargeStageTime(c.stages[c.level], c) + CHARGE_SYNC_MARGIN;
+			if (Math.abs(at - c.nextAt) > 5) {
+				recordPacket('MOD', 'Charge level synced to the server stage', { skill: skillLabel(c.skillId), level: c.level + 1, by: Math.round(at - c.nextAt) });
+				scheduleChargeStages(c, c.level, at);
 			}
 		}
 

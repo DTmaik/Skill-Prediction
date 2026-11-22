@@ -104,6 +104,7 @@ const KDS_CHAIN_FROM = ['14:0', '14:1', '14:2'];
 const KDS_ALLOWED_DURING = [18, 19, 5, 20, 14];
 const ABN_SECOND_ROLL = 301200;
 const CHARGE_END_FALLBACK = 500;
+const CHARGE_END_P115 = 40;
 
 const LEGACY = {
 	dirs: ['neuesSlayerSP'],
@@ -123,6 +124,7 @@ const LEGACY = {
 
 function setup(api) {
 	const { groupOf, subOf, baseOf, getSkillId } = api;
+	const P115 = Boolean(api.dispatch && api.dispatch.isP115); // OSTO 115 hybrid client (see p115.js)
 	const at = (id, g, ...subs) => groupOf(id) === g && (subs.length === 0 || subs.includes(subOf(id)));
 	const running = () => { const a = api.action(); return a && !a.finished ? a : null; };
 	const runningGroup = () => { const a = running(); return a ? groupOf(a.skillId) : -1; };
@@ -279,8 +281,16 @@ function setup(api) {
 		a.dest = { x: event.loc.x, y: event.loc.y, z: event.loc.z };
 		const travel = Math.hypot(event.loc.x - a.start.x, event.loc.y - a.start.y);
 
-		a.normDuration = Math.max(d.minDuration || 0, (travel / d.distance) * d.duration) + CHARGE_END_FALLBACK;
-		api.scheduleActionEnd(a, a.normDuration / (a.speed || 1));
+		// 115 client log (slayer, 2026-11-22): the server dash runs ~travel/434*970 + 13-30 ms (travel 102-111: 250-272 ms). With the 500 ms
+		// fallback our Charging Slash always ended only with the server end (a ping late, next skill ~96 ms later) - now just after it.
+		a.normDuration = Math.max(d.minDuration || 0, (travel / d.distance) * d.duration) + (P115 ? CHARGE_END_P115 : CHARGE_END_FALLBACK);
+		let ms = a.normDuration / (a.speed || 1);
+		if (P115) {
+			// the server started the dash late (skill before it ran longer there): our end follows its start, so the next skill is not early
+			const ack = api.serverSkillAckAt(a.skillId);
+			if (ack >= a.startedAt) ms = Math.max(ms, ack - api.estimateRtt() - a.startedAt + ms);
+		}
+		api.scheduleActionEnd(a, ms);
 	});
 
 	function sendHeldDB() {

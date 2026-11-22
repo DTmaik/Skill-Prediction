@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const createPrediction = require('./core');
 const omni = require('./omni');
+const p115 = require('./p115');
 
 const CLASS_FILES = ['zerk', 'gunner', 'archer', 'sorc', 'reaper', 'slayer', 'lancer', 'warrior', 'priest', 'mystic'];
 
@@ -19,10 +20,42 @@ for (const file of CLASS_FILES) {
 	}
 }
 
+// first start on the 115 client: take the P31 class settings and learned values (data/<class>/*.json) as starting point
+function seedP115Data(from, to) {
+	if (fs.existsSync(to)) return;
+	try {
+		fs.mkdirSync(to, { recursive: true });
+		if (!fs.existsSync(from)) return;
+		for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+			const src = path.join(from, entry.name), dst = path.join(to, entry.name);
+			if (!entry.isDirectory()) continue; // data/shared.json (ping, omni keys) stays shared
+			fs.mkdirSync(dst, { recursive: true });
+			for (const f of fs.readdirSync(src)) {
+				if (f.endsWith('.json') && fs.statSync(path.join(src, f)).isFile()) fs.copyFileSync(path.join(src, f), path.join(dst, f));
+			}
+		}
+		console.log('[Skill-Prediction] 115 client: settings and learned values copied from data/ to data-p115/');
+	} catch (e) {
+		console.error('[Skill-Prediction] data-p115/ could not be prepared:', e);
+	}
+}
+
 module.exports = function SkillPrediction(dispatch) {
 	console.log('[Skill-Prediction] by Soaria');
 
+	// OSTO 115 hybrid client: same P31 server, but 115.02 packets. p115.js translates them, the prediction itself is unchanged.
+	// Class settings / learned values of the 115 client live in data-p115/<class>/ (first start: copied from data/), so the two clients
+	// never overwrite each other's learned values. data/shared.json (ping, omni keys) is used by both.
+	const P115 = p115.isP115(dispatch);
+	if (P115) {
+		dispatch = p115.wrap(dispatch, (msg) => console.log(`[Skill-Prediction] 115 client: ${msg}`));
+		console.log('[Skill-Prediction] 115 client detected - packets are translated, data in data-p115/');
+	}
+	const DATA_ROOT = path.join(__dirname, P115 ? 'data-p115' : 'data');
+	if (P115) seedP115Data(path.join(__dirname, 'data'), DATA_ROOT);
+
 	(function loadLocalDefinitions() {
+		if (P115) return; // only needed for the P31 protocol (packets do not exist on the 115 client)
 		const proxyDispatch = dispatch.dispatch || dispatch;
 		if (typeof proxyDispatch.addDefinition !== 'function') return;
 		let files = [];
@@ -47,7 +80,7 @@ module.exports = function SkillPrediction(dispatch) {
 		try {
 			const inst = createPrediction(dispatch, def, {
 				modDir: __dirname,
-				dataDir: path.join(__dirname, 'data', def.DATA_DIR || def.CMD),
+				dataDir: path.join(DATA_ROOT, def.DATA_DIR || def.CMD),
 				initialState
 			});
 			active = { def, inst };
@@ -85,8 +118,8 @@ module.exports = function SkillPrediction(dispatch) {
 	const defs = Object.values(CLASSES);
 
 	const SP_NAME = 'Skill-Prediction';
-	const sharedPath = path.join(__dirname, 'data', 'shared.json');
-	const configOf = (def) => path.join(__dirname, 'data', def.DATA_DIR || def.CMD, 'config.json');
+	const sharedPath = path.join(__dirname, 'data', 'shared.json'); // ping / omni keys: the same for both clients (core.js reads it from data/ too)
+	const configOf = (def) => path.join(DATA_ROOT, def.DATA_DIR || def.CMD, 'config.json');
 	function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return null; } }
 	// settings for all classes (ping, omni keys) in data/shared.json
 	function writeShared(patch) {
