@@ -165,6 +165,7 @@ function setup(api) {
 	let p115ChainAt = 0;
 	const FLATTEN_BLOCK_FROM = 1770;
 	const ROLL_BLOCK_EXTRA = 10;
+	const CYCLONE_BLOCK_FROM = 335;
 	const ABN_TS_RAZE_GLYPH = 24170;
 	let pendingBlock = null;
 	let sendingHeldBlock = false;
@@ -551,16 +552,36 @@ function setup(api) {
 		const roll = Number(api.skills.evasiveSmashRoll && api.skills.evasiveSmashRoll.duration) || 995;
 		return Math.max(0, (roll + ROLL_BLOCK_EXTRA - arrive) / speed);
 	}
-	function holdFlattenBlock(event, wait, roll) {
-		pendingBlock = { press: api.copyEvent(event), release: null, next: [], roll: Boolean(roll), timer: api.setTimeout(sendPendingBlock, wait) };
-		api.recordPacket('MOD', roll ? 'Block held back (server still in the Evasive Smash roll)' : 'Block held back (Flatten chain cannot be cancelled yet)', { wait: Math.round(wait) });
+	// log ttb-1795441158391 (P31 client): the server refuses a block in the Cyclone release (10:10-13) until ~320 ms (attack speed 1.0)
+	// after its own start (refused at 306, accepted at 331). SP showed the block, ended Cyclone and predicted the Thunder Strike pressed
+	// next while the server was still spinning: the server ignored it = ghost Thunder Strike ("skill cancelled"). Held like the others.
+	function cycloneBlockWait() {
+		const a = running();
+		const sv = api.serverActive();
+		const rel = (id) => at(id, 10, 10, 11, 12, 13);
+		let svAt;
+		if (sv && rel(sv.id)) svAt = sv.at;
+		else if (a && rel(a.skillId)) svAt = a.startedAt + api.estimateRtt();
+		else return 0;
+		const speed = (a && rel(a.skillId) && a.speed) || api.aspd();
+		const arrive = (Date.now() - svAt + api.estimateRtt()) * speed;
+		return Math.max(0, (CYCLONE_BLOCK_FROM - arrive) / speed);
+	}
+	const HELD_BLOCK_TEXT = {
+		flatten: ['Block held back (Flatten chain cannot be cancelled yet)', 'Held block sent (Flatten chain can be cancelled now)'],
+		roll: ['Block held back (server still in the Evasive Smash roll)', 'Held block sent (server roll is over)'],
+		cyclone: ['Block held back (Cyclone release cannot be cancelled yet)', 'Held block sent (Cyclone release can be cancelled now)']
+	};
+	function holdFlattenBlock(event, wait, kind = 'flatten') {
+		pendingBlock = { press: api.copyEvent(event), release: null, next: [], roll: kind === 'roll', kind, timer: api.setTimeout(sendPendingBlock, wait) };
+		api.recordPacket('MOD', HELD_BLOCK_TEXT[kind][0], { wait: Math.round(wait) });
 	}
 	function sendPendingBlock() {
 		const p = pendingBlock;
 		if (!p) return;
 		pendingBlock = null;
 		api.clearTimeout(p.timer);
-		api.recordPacket('MOD->S', p.roll ? 'Held block sent (server roll is over)' : 'Held block sent (Flatten chain can be cancelled now)', { tap: Boolean(p.release), next: p.next.length });
+		api.recordPacket('MOD->S', HELD_BLOCK_TEXT[p.kind || 'flatten'][1], { tap: Boolean(p.release), next: p.next.length });
 		sendingHeldBlock = true;
 		try {
 			api.startPress(p.press);
@@ -688,7 +709,11 @@ function setup(api) {
 					const wait = flattenBlockWait();
 					if (wait > 0) { blockHeld = true; holdFlattenBlock(event, wait); return 'drop'; }
 					const rollWait = rollBlockWait();
-					if (rollWait > 0) { blockHeld = true; holdFlattenBlock(event, rollWait, true); return 'drop'; }
+					if (rollWait > 0) { blockHeld = true; holdFlattenBlock(event, rollWait, 'roll'); return 'drop'; }
+				}
+				if (event.press && !sendingHeldBlock) {
+					const cycloneWait = cycloneBlockWait(); // server rule, both clients
+					if (cycloneWait > 0) { blockHeld = true; holdFlattenBlock(event, cycloneWait, 'cyclone'); return 'drop'; }
 				}
 				if (!event.press) {
 					blockHeld = false;
