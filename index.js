@@ -6,6 +6,7 @@ const path = require('path');
 const createPrediction = require('./core');
 const omni = require('./omni');
 const p115 = require('./p115');
+const startBossSync = require('./bosssync');
 
 const CLASS_FILES = ['zerk', 'gunner', 'archer', 'sorc', 'reaper', 'slayer', 'lancer', 'warrior', 'priest', 'mystic'];
 
@@ -130,6 +131,14 @@ module.exports = function SkillPrediction(dispatch) {
 		const shared = readJson(sharedPath);
 		if (shared && shared.OMNI_KEYS) omni.setKeys(shared.OMNI_KEYS);
 	}
+	// boss sync for all classes (bosssync.js), on unless data/shared.json has BOSS_SYNC: false
+	let bossSyncOn = (() => { const shared = readJson(sharedPath); return !(shared && shared.BOSS_SYNC === false); })();
+	const bossSync = startBossSync(dispatch, () => bossSyncOn);
+	function bossSyncCommand() {
+		bossSyncOn = !bossSyncOn;
+		try { writeShared({ BOSS_SYNC: bossSyncOn }); } catch (e) { console.error(`[${SP_NAME}] data/shared.json could not be saved:`, e); }
+		sendChat(SP_NAME, `Boss sync: ${bossSyncOn ? 'on - bosses are put where the server has them after every attack' : 'off'} (all classes). Remove the mod "no-more-boss-desyncs" when this is on.`);
+	}
 	function omniKeysCommand(arg) {
 		if (arg === undefined) return sendChat(SP_NAME, `Omni keys (forward, left, back, right): ${omni.keyNames().toUpperCase()}. Change: sp omnikeys zqsd (AZERTY) or your own 4 keys, default: sp omnikeys wasd`);
 		if (!omni.setKeys(arg)) return sendChat(SP_NAME, 'Give 4 different letters or digits in the order forward, left, back, right, for example sp omnikeys zqsd');
@@ -139,9 +148,11 @@ module.exports = function SkillPrediction(dispatch) {
 	function spCommand(args) {
 		const sub = String(args[0] || '').toLowerCase();
 		if (sub === 'omnikeys') return omniKeysCommand(args[1]);
+		if (sub === 'bosssync') return bossSyncCommand();
 		if (sub !== 'ping') {
 			sendChat(SP_NAME, 'sp ping 110 sets your ping (in ms) for all classes at once.');
-			return sendChat(SP_NAME, 'sp omnikeys zqsd sets the omni keys (forward, left, back, right), e.g. for AZERTY.');
+			sendChat(SP_NAME, 'sp omnikeys zqsd sets the omni keys (forward, left, back, right), e.g. for AZERTY.');
+			return sendChat(SP_NAME, `sp bosssync turns the boss sync on/off (now: ${bossSyncOn ? 'on' : 'off'}).`);
 		}
 		if (args[1] === undefined) {
 			const shared = readJson(sharedPath);
@@ -213,6 +224,7 @@ module.exports = function SkillPrediction(dispatch) {
 		destructor() {
 			stopActive();
 			try { require('./omni').stop(); } catch (e) {}
+			try { bossSync.stop(); } catch (e) {}
 			if (dispatch.command && typeof dispatch.command.remove === 'function') {
 				for (const def of defs) { try { dispatch.command.remove(def.CMD); } catch (e) {} }
 				try { dispatch.command.remove('sp'); } catch (e) {}

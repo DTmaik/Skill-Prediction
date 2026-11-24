@@ -15,7 +15,7 @@ Priest, Mystic.
 
 1. Download this repository (Code > Download ZIP) and extract it.
 2. Put the folder in your Toolbox `mods` folder and name it `Skill-Prediction`.
-3. Remove/Disable other Skill-Prediction modules in your Toolbox, also Remove/Disable the mod `omnidirectional` as it's already build into this mod.
+3. Remove/Disable other Skill-Prediction modules in your Toolbox, also Remove/Disable the mod `omnidirectional` and the mod `no-more-boss-desyncs`, as both are already built into this mod.
 
 Do not run it together with another skill prediction mod.
 
@@ -35,6 +35,7 @@ it shows all options of that class and whether they are on.
 | `!<class> reload` | Read the config again after editing it by hand |
 | `!sp ping <ms>` | Set your ping once for all classes (`!sp ping` shows it) |
 | `!sp omnikeys <keys>` | Your movement keys for `omni`, in the order forward, left, back, right, for all classes. For example `!sp omnikeys zqsd` (AZERTY) or your own keys like `gfde`. `!sp omnikeys wasd` is the default |
+| `!sp bosssync` | Boss sync on/off (on by default, all classes): after every attack the boss is put where the server has it, so attacks, dashes and lock-ons go to the real spot (like the mod `no-more-boss-desyncs`) |
 
 Some class options:
 
