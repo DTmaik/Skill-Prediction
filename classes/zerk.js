@@ -166,6 +166,8 @@ function setup(api) {
 	const FLATTEN_BLOCK_FROM = 1770;
 	const ROLL_BLOCK_EXTRA = 10;
 	const CYCLONE_BLOCK_FROM = 335;
+	const CYCLONE_END_STEPS = 1.4;
+	let cycSpin = null; // running Cyclone release: last client position report and its spin
 	const ABN_TS_RAZE_GLYPH = 24170;
 	let pendingBlock = null;
 	let sendingHeldBlock = false;
@@ -297,19 +299,33 @@ function setup(api) {
 		if (info.allowRetry && fam.releaseRetry) api.scheduleReleaseRetries(info.name, info.version, event, fam);
 		const stages = [];
 		for (let i = 1; i < n; i++) stages.push({ at: d.spinDuration * i, stage: i });
+		cycSpin = null;
+		const startLoc = { x: event.loc.x, y: event.loc.y, z: event.loc.z };
+		const spinLoc = (st, start, w) => {
+			const base = (cycSpin && cycSpin.base) || { loc: start, stage: 0 };
+			const dist = d.distance * Math.max(0, st - base.stage);
+			return { x: base.loc.x + Math.cos(w) * dist, y: base.loc.y + Math.sin(w) * dist, z: base.loc.z };
+		};
 		const a = api.predictChargeRelease(event, fam, {
 			duration: d.spinDuration * n + d.endDuration,
 			distance: 0,
 			stages,
 
-			// no stageLoc: the spins do not move the character, the client reports the same spot for each spin and the server takes
-			// that (C_NOTIFY_LOCATION_IN_ACTION). Marching 35 units per spin along the start direction was ignored by the client while
-			// under about 165 units off; with a small sideways drift it reached 210 at the last spin and the client snapped to it,
-			// into the boss (log ttb-1795309197604).
+			// every spin moves the character about 33 units along the start direction (server stages without position reports, log
+			// ttb-1795553653467). Stage n = last client position report + the spins since that report: putting every spin at the last
+			// report (which lags one spin while moving freely) pulled the character back about 33 units again and again (stutter),
+			// marching from the start only (as before) ran up to 210 units ahead while a boss held the character and the client
+			// snapped to it, into the boss (log ttb-1795309197604). Held by a boss the client reports its spot after each spin, so
+			// the next spin is at most one step ahead.
+			stageLoc: spinLoc,
+			// the end stays where the server ends it: last spin + about 1.4 steps (50 units, log ttb-1795555068598) - it was the start
+			// (no client report while moving freely), 184 units behind the server end
+			endLoc: () => spinLoc(n - 1 + CYCLONE_END_STEPS, startLoc, event.w),
 			onStage: (st) => {
 				if (st === 1 && subOf(sid) === 13) openVampWindow(sid, 0, (d.spinDuration * 4 + d.endDuration) / api.aspd());
 			}
 		});
+		cycSpin = { action: a, base: null };
 		const aspd = api.aspd();
 		api.lock('3:0', a.normDuration / a.speed);
 		api.lock('4:0', (d.spinDuration * n + d.flattenLockExtra) / aspd);
@@ -812,6 +828,9 @@ function setup(api) {
 		},
 
 		notify(copy) {
+			if (cycSpin && running() === cycSpin.action && at(copy.skill, 10, 10, 11, 12, 13) && copy.loc) {
+				cycSpin.base = { loc: { x: copy.loc.x, y: copy.loc.y, z: copy.loc.z }, stage: Number(copy.stage) || 0 };
+			}
 			if (!dstance) return;
 			const id = copy.skill;
 			let mapped = null;
