@@ -40,6 +40,11 @@ const CHARGE = { mode: 'charge', subs: [0], releaseSubs: [10, 11, 12, 13], relea
 	pressRetry: [50, 100, 150, 200], releaseRetry: [40, 80, 120, 160], retry: false, selfLock: 0 };
 
 const RAZE_AFTER_VAMP_MIN = 700;
+// P31 bug report 2026-11-26 "delay" + sniff zerk_flatten: the server ignores Flatten after Raze before ~500 ms (attack speed 1.0)
+// after its own Raze start (ignored at 169 / 252 / 308, accepted at 500 / 603 / 693). When SP runs ahead of the server (held Raze
+// request, slower server) the chain was sent too early, the server stayed in Raze and only the client's own new press ~450 ms later
+// got Flatten through - SP ran ~550 ms ahead of the server from there on.
+const FLATTEN_AFTER_RAZE_MIN = 500;
 
 const FAMILIES = {
 	1: { key: 'combo', mode: 'combo', subs: [0, 1, 2, 3], retry: [35, 75], selfLock: 100, cancelOnlyBy: [1, 2, 25], locks: [LOCK_TS] },
@@ -169,6 +174,7 @@ function setup(api) {
 	const CYCLONE_END_STEPS = 1.4;
 	let cycSpin = null; // running Cyclone release: last client position report and its spin
 	const ABN_TS_RAZE_GLYPH = 24170;
+	const reqSendAt = {}; // group -> when its last held request is sent
 	let pendingBlock = null;
 	let sendingHeldBlock = false;
 	let vampPress = null;
@@ -548,7 +554,7 @@ function setup(api) {
 		const a = running();
 		if (!a || !at(a.skillId, 4, 30)) return 0;
 		const sv = api.serverActive();
-		const svAt = sv && at(sv.id, 4, 30) ? sv.at : a.startedAt + api.estimateRtt();
+		const svAt = sv && at(sv.id, 4, 30) ? sv.at : Math.max(a.startedAt, reqSendAt[4] || 0) + api.estimateRtt();
 		const speed = a.speed || api.aspd();
 		const arrive = (Date.now() - svAt + api.estimateRtt()) * speed;
 		return Math.max(0, (FLATTEN_BLOCK_FROM - arrive) / speed);
@@ -680,20 +686,29 @@ function setup(api) {
 		// 115 client logs: the Thunder Strike release runs 25 % faster while abnormality 24170 (Raze glyph buff, consumed by the
 		// release) is active - server speed 1.986 / 1.486 at attack speed 1.589 / 1.189, and 1.0x without it. Without this SP learned
 		// the 1.25 after two releases and then also used it without the buff (release ended too early, block refused).
+		// P31 the same (sniff zerk_flatten: 2.25 / 1.667 / 1.986 with the buff, 1.8 / 1.333 without; bug report "delay": SP used the
+		// learned 2.25 without the buff, Vampiric Blow went out ~170 ms too early and the server took only the resend).
 		skillSpeed(sid) {
-			if (P115 && at(sid, 3, 10, 11, 12, 13) && api.hasAbnormal(ABN_TS_RAZE_GLYPH)) return 1.25;
+			if (at(sid, 3, 10, 11, 12, 13) && api.hasAbnormal(ABN_TS_RAZE_GLYPH)) return 1.25;
 			return 1;
 		},
 
 		requestDelay(sid) {
-			if (groupOf(sid) !== 25) return 0;
+			const g = groupOf(sid);
+			let min = 0, from = null;
+			if (g === 25) { min = RAZE_AFTER_VAMP_MIN; from = (id) => at(id, 15, 14); }
+			else if (g === 4) { min = FLATTEN_AFTER_RAZE_MIN; from = (id) => groupOf(id) === 25; }
+			else return 0;
 			const a = api.action();
-			if (!a || a.finished || !at(a.skillId, 15, 14)) return 0;
+			if (!a || a.finished || !from(a.skillId)) return 0;
 			const sv = api.serverActive();
-			const svAt = sv && at(sv.id, 15, 14) ? sv.at : a.startedAt + api.estimateRtt();
+			// the server starts it at the earliest one round trip after its request went out (held requests go out later)
+			const svAt = sv && from(sv.id) ? sv.at : Math.max(a.startedAt, reqSendAt[groupOf(a.skillId)] || 0) + api.estimateRtt();
 			const speed = a.speed || api.aspd();
 			const arrive = (Date.now() - svAt + api.estimateRtt()) * speed;
-			return Math.max(0, (RAZE_AFTER_VAMP_MIN - arrive) / speed);
+			const wait = Math.max(0, (min - arrive) / speed);
+			if (wait > 0) reqSendAt[g] = Date.now() + wait;
+			return wait;
 		},
 
 		press(event, info) {
@@ -721,9 +736,13 @@ function setup(api) {
 				const sub = subOf(sid);
 				if (sub === 1 || sub === 31) setDstance(true, 'tank block');
 				else if (sub === 0 || sub === 30) setDstance(false, 'offensive block');
-				if (P115 && event.press && !sendingHeldBlock) {
+				if (event.press && !sendingHeldBlock) {
+					// P31 too (sniff zerk_flatten: accepted at 1747 / 1760 / 1890 / 2014; bug report "delay": refused at 729, SP showed
+					// the block and the Cyclone pressed next, the server stayed in Flatten and started Cyclone 811 ms late)
 					const wait = flattenBlockWait();
 					if (wait > 0) { blockHeld = true; holdFlattenBlock(event, wait); return 'drop'; }
+				}
+				if (P115 && event.press && !sendingHeldBlock) {
 					const rollWait = rollBlockWait();
 					if (rollWait > 0) { blockHeld = true; holdFlattenBlock(event, rollWait, 'roll'); return 'drop'; }
 				}

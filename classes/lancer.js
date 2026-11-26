@@ -96,6 +96,11 @@ const BLOCK_WAIT_MAX = 200;
 const SB_MOVE_DONE = 450;
 // chain requests wait this much longer than the server delay, else they arrive too early and are ignored
 const CHAIN_HOLD_MARGIN = 20;
+// bug report lancer 2026-11-26 "dasda" + vanilla sniff ttb-1795705062884: the server takes Spring Attack out of Shield Counter only
+// late in the counter - ignored without an answer at 682 (attack speed 1.0, after its own counter start), chained at 947 / 1032 /
+// 1312 / 1312, the counter runs 1425. The client asks from ~650: the server ran the counter in full, started plain Spring Attack
+// 642 ms after ours and every skill after it had to wait ~650-800 ms. The request is now held until the server takes it.
+const SPRING_AFTER_COUNTER_FROM = 950;
 const ABN_BARRAGE_SPEED = 201550;
 const BARRAGE_BUFF_SPEED = 1.2;
 
@@ -336,6 +341,18 @@ function setup(api) {
 
 		if (ours.heldSentAt) return ours.heldSentAt - ours.startedAt;
 		return 0;
+	}
+
+	// Spring Attack in our Shield Counter: wait until the request reaches the server late enough in its counter
+	function springAfterCounterWait(sid, ours) {
+		if (groupOf(sid) !== 13 || !ours || groupOf(ours.skillId) !== 8) return 0;
+		const sv = api.serverActive();
+		const own = sv && groupOf(sv.id) === 8 && svStart(sv) >= (ours.requestedAt || 0);
+		const st = own ? serverStarts.get(sv.actionId) : null;
+		const svAt = own ? svStart(sv) : Math.max(ours.startedAt, ours.heldSentAt || 0) + rttTyp();
+		const speed = (st && st.speed) || ours.speed || api.aspd();
+		const arrive = (Date.now() - svAt + rttTyp()) * speed;
+		return Math.max(0, (SPRING_AFTER_COUNTER_FROM - arrive) / speed);
 	}
 
 	function holdRequest(info, event, delay, label, kind) {
@@ -670,6 +687,13 @@ function setup(api) {
 				let r = cls.predictNow(event, info, g, true);
 				if (r === undefined) r = cls.predictNow(event, info, g, false);
 				if (r === 'done') return holdRequest(info, event, Math.max(0, upAt - Date.now()) + 10, 'Skill held back (block release not sent yet)', 'lag');
+			}
+
+			const scWait = springAfterCounterWait(sid, ours);
+			if (scWait > 0) {
+				let r = cls.predictNow(event, info, g, true);
+				if (r === undefined) r = cls.predictNow(event, info, g, false);
+				if (r === 'done') return holdRequest(info, event, scWait, 'Spring Attack held back (server takes it only late in Shield Counter)', 'chain');
 			}
 
 			let lag = serverLag(ours);
