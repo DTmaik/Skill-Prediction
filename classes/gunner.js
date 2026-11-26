@@ -194,6 +194,12 @@ function setup(api) {
 		queueStart(info, event, wait, groupOf(a.skillId), 'Next skill after the arrow chain shown + sent later (server behind)');
 		return true;
 	}
+	// the request a queueStart sent: the client asks for it again right when our previous animation ends (its own key press, queued
+	// during that animation), 1 ms after we sent it. That copy reached the server and started the skill a second time - Burst Fire after
+	// the Replenishment chain (115 client bug report 2026-11-26): the server ended its windup and started it again, our windup was ended
+	// with it, the client fired at once and every shot was refused for ~870 ms (ghost shots).
+	let queuedSent = null;
+	const QUEUED_ECHO_MS = 100;
 	// shown AND sent after wait ms; a newer request of another group replaces it meanwhile (spam), the timer stays
 	function queueStart(info, event, wait, chainGroup, note) {
 		lagQueue = { chainGroup, name: info.name, version: info.version, event: api.copyEvent(event), at: Date.now() };
@@ -202,7 +208,10 @@ function setup(api) {
 		lagTimer = api.setTimeout(() => {
 			const q = lagQueue;
 			lagQueue = null;
-			if (q && api.predicting()) api.startSkill(q.name, q.version, freshEvent(q.event, q.at));
+			if (!q || !api.predicting()) return;
+			const ev = freshEvent(q.event, q.at);
+			api.startSkill(q.name, q.version, ev);
+			queuedSent = { sid: getSkillId(ev.skill), name: q.name, at: Date.now() };
 		}, wait);
 	}
 	// Blast during the Mana Missiles shot (96010/96011): the client allows it ~512 ms into its animation, the server refused it there and
@@ -546,6 +555,10 @@ function setup(api) {
 			const runningG = a ? groupOf(a.skillId) : -1;
 			if (g === 11 && !isRocket(sid)) return 'pass';
 			if (!info.fam) return undefined;
+			if (queuedSent && queuedSent.sid === sid && queuedSent.name === info.name && Date.now() - queuedSent.at < QUEUED_ECHO_MS && a && (a.requestId || a.skillId) === sid) {
+				api.recordPacket('MOD', 'Client request dropped (copy of the request the mod just sent for it)', { skill: api.skillLabel(sid) });
+				return 'drop';
+			}
 			if (delayAfterArrow(info, event)) return 'drop';
 			if (delayBlastInManaShot(info, event)) return 'drop';
 			if (delayBlastAfterScatterChain(info, event)) return 'drop';
