@@ -59,7 +59,9 @@ const FAMILIES = {
 		chains: [{ from: [40], sub: 31, base: true, durationKey: 'superDuration', distanceKey: 'superDistance' },
 			{ from: chainFrom(11).filter(g => g !== 40), sub: 30, base: true, durationKey: 'duration', distanceKey: 'chainDistance' }] }, BASE),
 	13: Object.assign({ key: 'baldersVengeance', mode: 'simple', subs: [1, 2, 30], chains: CHAIN(13), chainOnSubs: [1, 2], fixedSpeed: true }, BASE),
-	15: Object.assign({ key: 'replenishment', mode: 'simple', subs: [1, 2, 30], chains: CHAIN(15), chainOnSubs: [1, 2], fixedSpeed: true }, BASE),
+	// not out of Time Bomb (6): the server runs the plain 150901/150902 there (vanilla sniff 2026-11-26: 3 of 3, plus 4 with the mod)
+	15: Object.assign({ key: 'replenishment', mode: 'simple', subs: [1, 2, 30], chains: [{ from: chainFrom(15).filter(g => g !== 6), sub: 30, base: true }],
+		chainOnSubs: [1, 2], fixedSpeed: true }, BASE),
 	18: Object.assign({ key: 'dispenser', mode: 'simple', subs: [1, 2], fixedSpeed: true }, BASE),
 	19: Object.assign({ key: 'sentryTower', mode: 'simple', subs: [1, 2, 30], chains: CHAIN(19), chainOnSubs: [1, 2] }, BASE),
 	20: { key: 'retaliate', mode: 'passthrough' },
@@ -232,11 +234,15 @@ function setup(api) {
 	// point the client allows it - and the server took it there only half of the time (refused at 1096 / 1114 / 1114 / 1115, accepted at
 	// 1115 / 1116): refused, retried ~155 ms later, our Blast shown 150 ms early. Now shown + sent so it arrives from 1130 on.
 	const P115 = Boolean(api.dispatch && api.dispatch.isP115);
+	// we show the chain (+30), but the server runs the plain skill of that group: nothing to wait for (bug report 2026-11-26: Time Bomb ->
+	// Replenishment shown as the chain 150930, the server ran 150902 both times and took Burst Fire at once - held 263 ms for nothing,
+	// Burst Fire no longer cancelled the Replenishment animation)
+	const serverRunsPlain = (g) => { const sv = api.serverActive(); return Boolean(sv && groupOf(sv.id) === g && subOf(sv.id) !== 30); };
 	const SCATTER_CHAIN_BLAST_FROM = 1130;
 	function delayBlastAfterScatterChain(info, event) {
 		if (!P115 || groupOf(info.sid) !== 1 || info.name !== 'C_START_SKILL') return false;
 		const a = api.action();
-		if (!a || a.finished || !at(a.skillId, 3, 30)) return false;
+		if (!a || a.finished || !at(a.skillId, 3, 30) || serverRunsPlain(3)) return false;
 		const rtt = api.estimateRtt();
 		const ack = api.serverSkillAckAt(a.skillId);
 		const svAt = ack >= a.startedAt ? ack : a.startedAt + rtt;
@@ -251,7 +257,7 @@ function setup(api) {
 	function delayAfterReplenishChain(info, event) {
 		if (!P115 || groupOf(info.sid) === 15 || groupOf(info.sid) === 40 || !/^C_START_(SKILL|COMBO_INSTANT_SKILL)$/.test(info.name)) return false;
 		const a = api.action();
-		if (!a || a.finished || !at(a.skillId, 15, 30)) return false;
+		if (!a || a.finished || !at(a.skillId, 15, 30) || serverRunsPlain(15)) return false;
 		const rtt = api.estimateRtt();
 		const ack = api.serverSkillAckAt(a.skillId);
 		const svAt = ack >= a.startedAt ? ack : a.startedAt + rtt;
