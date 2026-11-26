@@ -100,6 +100,8 @@ const CHAIN_HOLD_MARGIN = 20;
 // late in the counter - ignored without an answer at 682 (attack speed 1.0, after its own counter start), chained at 947 / 1032 /
 // 1312 / 1312, the counter runs 1425. The client asks from ~650: the server ran the counter in full, started plain Spring Attack
 // 642 ms after ours and every skill after it had to wait ~650-800 ms. The request is now held until the server takes it.
+// Mod log ttb-1795706558604: shown at the key press and only the request held, its hits came 110-170 ms later than usual for the
+// animation. Now the counter keeps playing and Spring Attack is shown and sent together when the server takes it.
 const SPRING_AFTER_COUNTER_FROM = 950;
 const ABN_BARRAGE_SPEED = 201550;
 const BARRAGE_BUFF_SPEED = 1.2;
@@ -238,6 +240,8 @@ function setup(api) {
 		return along(base.loc, pred.w, d);
 	}
 	const serverStarts = new Map();
+	let pendingSpring = null; // Spring Attack pressed early in our Shield Counter, shown + sent when the server takes it
+	let sendingSpring = false;
 	const rttSamples = [];
 
 	function rttTyp() {
@@ -353,6 +357,22 @@ function setup(api) {
 		const speed = (st && st.speed) || ours.speed || api.aspd();
 		const arrive = (Date.now() - svAt + rttTyp()) * speed;
 		return Math.max(0, (SPRING_AFTER_COUNTER_FROM - arrive) / speed);
+	}
+
+	function sendPendingSpring() {
+		const p = pendingSpring;
+		if (!p) return;
+		pendingSpring = null;
+		api.clearTimeout(p.timer);
+		api.recordPacket('MOD->S', 'Held Spring Attack shown + sent (server takes it now)', { skill: api.skillLabel(getSkillId(p.event.skill)) });
+		sendingSpring = true;
+		try { api.startSkill(p.name, p.version, p.event); } finally { sendingSpring = false; }
+	}
+	function dropPendingSpring(reason) {
+		if (!pendingSpring) return;
+		api.clearTimeout(pendingSpring.timer);
+		api.recordPacket('MOD', 'Held Spring Attack dropped', { reason });
+		pendingSpring = null;
 	}
 
 	function holdRequest(info, event, delay, label, kind) {
@@ -637,6 +657,10 @@ function setup(api) {
 			const ours = a && !a.isHold ? a : null;
 
 			if (blocking() && !DURING_BLOCK.includes(g)) return 'drop';
+			if (pendingSpring && !sendingSpring) {
+				if (g === 13) return 'drop'; // repeated press while it waits
+				dropPendingSpring('new key press');
+			}
 
 			if (ours) {
 				if (g === 13 && !api.matchesAny(plain(ours.skillId), SPRING_AFTER)) return 'drop';
@@ -689,11 +713,12 @@ function setup(api) {
 				if (r === 'done') return holdRequest(info, event, Math.max(0, upAt - Date.now()) + 10, 'Skill held back (block release not sent yet)', 'lag');
 			}
 
-			const scWait = springAfterCounterWait(sid, ours);
+			const scWait = sendingSpring ? 0 : springAfterCounterWait(sid, ours);
 			if (scWait > 0) {
-				let r = cls.predictNow(event, info, g, true);
-				if (r === undefined) r = cls.predictNow(event, info, g, false);
-				if (r === 'done') return holdRequest(info, event, scWait, 'Spring Attack held back (server takes it only late in Shield Counter)', 'chain');
+				// the chain request itself waits CHAIN_HOLD_MARGIN after it is shown (lag hold below)
+				pendingSpring = { name: info.name, version: info.version, event: api.copyEvent(event), timer: api.setTimeout(sendPendingSpring, Math.max(0, scWait - CHAIN_HOLD_MARGIN)) };
+				api.recordPacket('MOD', 'Spring Attack held back (server takes it only late in Shield Counter)', { wait: Math.round(scWait) });
+				return 'drop';
 			}
 
 			let lag = serverLag(ours);
@@ -946,6 +971,8 @@ function setup(api) {
 			resetCombo();
 			for (const h of held) api.clearTimeout(h.timer);
 			held.length = 0;
+			if (pendingSpring) api.clearTimeout(pendingSpring.timer);
+			pendingSpring = null;
 			pressHeld = null;
 			mismatch.clear();
 			defended = false;
