@@ -121,6 +121,9 @@ const LAG_HOLD_MIN = 15;
 // earliest point (attack speed 1.0) the server accepts these chains; earlier requests are held
 const CHAIN_MIN = [
 	{ group: 29, from: '19:1', ms: 540 },
+	// Charging Slash follow-up -> Blade Draw: ignored at 223, taken at 241/331/420 (bug report 2026-11-27: the ignored chain left the server
+	// ~620 ms behind, the next Evasive Roll came too early in its Poison Blade and was refused)
+	{ group: 29, from: '16:1', ms: 250 },
 	{ group: 30, from: '2:0', ms: 320 },
 	// Combative Strike -> Rain of Blows: the server silently ignores the chain before ~415 (log: 413 ignored, 419 taken)
 	{ group: 4, from: '18', ms: 425 }

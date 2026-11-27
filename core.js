@@ -954,6 +954,13 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 	function handleStartInner(name, version, event, allowRetry) {
 		flushTapUp(getSkillId(event.skill));
 		dropStaleEchoes(getSkillId(event.skill));
+		if (delayedStart && !delayedRun) {
+			const s2 = getSkillId(event.skill);
+			if (groupOf(s2) === groupOf(delayedStart.sid)) return false; // client asks again while it waits
+			delayedStart.next.push({ name, version, event: copyEvent(event) });
+			recordPacket('MOD', 'Skill queued behind the held skill', { skill: skillLabel(s2), held: skillLabel(delayedStart.sid) });
+			return false;
+		}
 		if (grantFix && !grantFix.sent && getSkillId(event.skill) === grantFix.from && Date.now() < grantFix.until) {
 			grantFix.sent = true;
 			recordPacket('MOD->S', 'Release rewritten to the charge level the server granted', { from: skillLabel(grantFix.from), to: skillLabel(grantFix.to) });
@@ -1031,7 +1038,11 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		}
 
 		let holdMs = 0;
-		if (player && CLS.requestDelay) holdMs = Number(CLS.requestDelay(sid, running, event)) || 0;
+		if (player && CLS.requestDelay && !delayedRun) holdMs = Number(CLS.requestDelay(sid, running, event)) || 0;
+		if (player && holdMs > 0 && !delayedRun && CLS.showHeldWhenSent && CLS.showHeldWhenSent(sid)) {
+			delayStart(name, version, event, sid, holdMs);
+			return false;
+		}
 		if (player && heldRequests.length) holdMs = Math.max(holdMs, 1);
 		const holding = holdMs > 0;
 		const isRelease = fam && fam.mode === 'charge' && (fam.releaseSubs || [10, 11, 12]).includes(subOf(sid));
@@ -1468,6 +1479,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		const sid = getSkillId(event.skill);
 		const fam = familyDef(sid);
 		if (event.press) { flushTapUp(sid); dropStaleEchoes(sid); }
+		if (event.press && delayedStart && groupOf(sid) !== groupOf(delayedStart.sid)) dropDelayedStart('new key press');
 		noteRealLoc(event.loc);
 		if (event.press) {
 			const base = baseOf(sid);
@@ -1534,6 +1546,37 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 	}
 
 	const heldRequests = [];
+
+	// zerk bug report "delay" / log ttb-1795808895929 (Flatten after Raze): a skill shown at the key press with only its request held
+	// runs ahead of the server - its hits came 60-90 ms late for the animation. For classes that want it (showHeldWhenSent) the
+	// previous skill keeps playing and the held skill is shown and sent together when the server takes it.
+	let delayedStart = null;
+	let delayedRun = false;
+	function delayStart(name, version, event, sid, ms) {
+		dropDelayedStart();
+		delayedStart = { name, version, event: copyEvent(event), sid, next: [], timer: setTimeout(runDelayedStart, ms) };
+		recordPacket('MOD', 'Skill held back (the server would ignore it this early): shown when sent', { skill: skillLabel(sid), delay: Math.round(ms) });
+	}
+	function dropDelayedStart(reason) {
+		if (!delayedStart) return;
+		clearTimeout(delayedStart.timer);
+		if (reason) recordPacket('MOD', 'Held skill dropped', { skill: skillLabel(delayedStart.sid), reason, queued: delayedStart.next.length });
+		delayedStart = null;
+	}
+	function runDelayedStart() {
+		const p = delayedStart;
+		if (!p) return;
+		delayedStart = null;
+		if (!predicting()) return;
+		recordPacket('MOD->S', `${p.name} [held skill shown + sent]`, { skill: skillLabel(p.sid) });
+		delayedRun = true;
+		try {
+			if (handleStart(p.name, p.version, p.event, true) !== false) dispatch.toServer(p.name, p.version, p.event);
+		} finally { delayedRun = false; }
+		for (const n of p.next) {
+			if (handleStart(n.name, n.version, n.event, true) !== false) dispatch.toServer(n.name, n.version, n.event);
+		}
+	}
 	// Soaria
 	// shows the skill now but sends the request later (the server would ignore it this early)
 	function holdRequest(name, version, event, delay) {
@@ -2029,6 +2072,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 			lastSkill = 1;
 			resetCharge();
 			hold = null;
+			dropDelayedStart();
 			if (action && !action.finished) { clearActionTimers(action); action.finished = true; }
 			const rid = event.reaction.id;
 			if (rid !== undefined && rid !== null && rid !== 0) {
@@ -2463,6 +2507,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		lastSkill = 0;
 		serverActive = null;
 		activeAbnormals.clear();
+		dropDelayedStart();
 		if (CLS.reset) CLS.reset();
 	}
 
@@ -2721,6 +2766,7 @@ module.exports = function createPrediction(dispatch, DEF, opts) {
 		}
 		resetCharge();
 		hold = null;
+		dropDelayedStart();
 		if (CLS.reset) CLS.reset();
 	}
 

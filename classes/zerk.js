@@ -710,6 +710,9 @@ function setup(api) {
 			if (wait > 0) reqSendAt[g] = Date.now() + wait;
 			return wait;
 		},
+		// log ttb-1795808895929: Flatten shown at the key press with only the request held -> hits 60-90 ms late for the animation.
+		// Raze / Flatten held by requestDelay are shown together with their request (the previous skill keeps playing until then).
+		showHeldWhenSent() { return true; },
 
 		press(event, info) {
 			const sid = info.sid;
